@@ -69,7 +69,7 @@ typedef struct mp_buf {
 
 static mp_buf *mp_buf_new(void) {
     mp_buf *buf = malloc(sizeof(*buf));
-    
+
     buf->b = NULL;
     buf->len = buf->free = 0;
     return buf;
@@ -328,7 +328,7 @@ static void mp_encode_lua_type(lua_State *L, mp_buf *buf, int level);
 
 /* Convert a lua table into a message pack list. */
 static void mp_encode_lua_table_as_array(lua_State *L, mp_buf *buf, int level) {
-    size_t len = lua_objlen(L,-1), j;
+    size_t len = lua_rawlen(L,-1), j;
 
     mp_encode_array(buf,len);
     for (j = 1; j <= len; j++) {
@@ -667,7 +667,7 @@ static int mp_unpack(lua_State *L) {
     s = (const unsigned char*) lua_tolstring(L,-1,&len);
     c = mp_cur_new(s,len);
     mp_decode_to_lua_type(L,c);
-    
+
     if (c->err == MP_CUR_ERROR_EOF) {
         mp_cur_free(c);
         lua_pushstring(L,"Missing bytes in input.");
@@ -687,21 +687,21 @@ static int mp_unpack(lua_State *L) {
 
 /* ---------------------------------------------------------------------------- */
 
-static const struct luaL_reg thislib[] = {
+static const struct luaL_Reg thislib[] = {
     {"pack", mp_pack},
     {"unpack", mp_unpack},
     {NULL, NULL}
 };
 
 LUALIB_API int luaopen_cmsgpack (lua_State *L) {
-    luaL_register(L, "cmsgpack", thislib);
+    luaL_newlib(L, thislib);
 
     lua_pushliteral(L, LUACMSGPACK_VERSION);
     lua_setfield(L, -2, "_VERSION");
     lua_pushliteral(L, LUACMSGPACK_COPYRIGHT);
     lua_setfield(L, -2, "_COPYRIGHT");
     lua_pushliteral(L, LUACMSGPACK_DESCRIPTION);
-    lua_setfield(L, -2, "_DESCRIPTION"); 
+    lua_setfield(L, -2, "_DESCRIPTION");
     return 1;
 }
 
