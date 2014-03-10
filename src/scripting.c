@@ -30,6 +30,7 @@
 #include "redis.h"
 #include "sha1.h"
 #include "rand.h"
+#include <pthread.h>
 
 #include <lua.h>
 #include <lauxlib.h>
@@ -221,7 +222,7 @@ int luaRedisGenericCommand(lua_State *lua, int raise_error) {
         argv[j] = createStringObject((char*)lua_tostring(lua,j+1),
                                      lua_strlen(lua,j+1));
     }
-    
+
     /* Check if one of the arguments passed by the Lua script
      * is not a string or an integer (lua_isstring() return true for
      * integers as well). */
@@ -476,7 +477,7 @@ void luaLoadLibraries(lua_State *lua) {
     luaLoadLib(lua, LUA_TABLIBNAME, luaopen_table);
     luaLoadLib(lua, LUA_STRLIBNAME, luaopen_string);
     luaLoadLib(lua, LUA_MATHLIBNAME, luaopen_math);
-    luaLoadLib(lua, LUA_DBLIBNAME, luaopen_debug); 
+    luaLoadLib(lua, LUA_DBLIBNAME, luaopen_debug);
     luaLoadLib(lua, "cjson", luaopen_cjson);
     luaLoadLib(lua, "struct", luaopen_struct);
     luaLoadLib(lua, "cmsgpack", luaopen_cmsgpack);
@@ -815,6 +816,7 @@ int luaCreateFunction(redisClient *c, lua_State *lua, char *funcname, robj *body
     return REDIS_OK;
 }
 
+
 void evalGenericCommand(redisClient *c, int evalsha) {
     lua_State *lua = server.lua;
     char funcname[43];
@@ -840,6 +842,7 @@ void evalGenericCommand(redisClient *c, int evalsha) {
     if (getLongLongFromObjectOrReply(c,c->argv[2],&numkeys,NULL) != REDIS_OK)
         return;
     if (numkeys > (c->argc - 3)) {
+        redisLog(REDIS_WARNING,"num keys %lld, num args %d", numkeys, c->argc - 3);
         addReplyError(c,"Number of keys can't be greater than number of args");
         return;
     }
@@ -894,7 +897,7 @@ void evalGenericCommand(redisClient *c, int evalsha) {
 
     /* Select the right DB in the context of the Lua client */
     selectDb(server.lua_client,c->db->id);
-    
+
     /* Set a hook in order to be able to stop the script execution if it
      * is running for too much time.
      * We set the hook only if the time limit is enabled as the hook will
@@ -963,8 +966,33 @@ void evalGenericCommand(redisClient *c, int evalsha) {
     }
 }
 
+struct thread_data {
+    redisClient *c;
+    int         evalsha;
+};
+
+static void *evalGenericCommandThreadHandler(void * threadarg) {
+    struct thread_data *my_data;
+    redisLog(REDIS_WARNING,"from lua thread");
+    my_data = (struct thread_data *) threadarg;
+    evalGenericCommand(my_data->c, my_data->evalsha);
+    redisLog(REDIS_WARNING,"lua thread ended");
+    pthread_exit(NULL);
+}
+
+void evalGenericCommandInBackground(redisClient *c, int evalsha) {
+    pthread_t thread;
+    int rc;
+    struct thread_data *data = zmalloc(sizeof(struct thread_data));
+    data->c = c;
+    data->evalsha = evalsha;
+    redisLog(REDIS_WARNING,"Starting lua thread");
+    rc = pthread_create(&thread, NULL, evalGenericCommandThreadHandler, (void *) data);
+    redisLog(REDIS_WARNING,"lua thread started");
+}
+
 void evalCommand(redisClient *c) {
-    evalGenericCommand(c,0);
+    evalGenericCommandInBackground(c,0);
 }
 
 void evalShaCommand(redisClient *c) {
@@ -976,7 +1004,7 @@ void evalShaCommand(redisClient *c) {
         addReply(c, shared.noscripterr);
         return;
     }
-    evalGenericCommand(c,1);
+    evalGenericCommandInBackground(c,1);
 }
 
 /* We replace math.random() with our implementation that is not affected
