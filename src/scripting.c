@@ -817,11 +817,83 @@ int luaCreateFunction(redisClient *c, lua_State *lua, char *funcname, robj *body
 }
 
 
+void luaCallAndReply(redisClient *c) {
+    lua_State *lua = server.lua;
+    int delhook = 0, err;
+
+    /* Set a hook in order to be able to stop the script execution if it
+     * is running for too much time.
+     * We set the hook only if the time limit is enabled as the hook will
+     * make the Lua script execution slower. */
+    server.lua_caller = c;
+    server.lua_time_start = mstime();
+    server.lua_kill = 0;
+    if (server.lua_time_limit > 0 && server.masterhost == NULL) {
+        lua_sethook(lua,luaMaskCountHook,LUA_MASKCOUNT,100000);
+        delhook = 1;
+    }
+
+    /* Assume in the stack there is the function to be called
+     * It should have zero arguments and we expect
+     * a single return value. */
+    err = lua_pcall(lua,0,1,-2);
+
+    /* Perform some cleanup that we need to do both on error and success. */
+    if (delhook) lua_sethook(lua,luaMaskCountHook,0,0); /* Disable hook */
+    if (server.lua_timedout) {
+        server.lua_timedout = 0;
+        /* Restore the readable handler that was unregistered when the
+         * script timeout was detected. */
+        aeCreateFileEvent(server.el,c->fd,AE_READABLE,
+                          readQueryFromClient,c);
+    }
+    server.lua_caller = NULL;
+    selectDb(c,server.lua_client->db->id); /* set DB ID from Lua client */
+    lua_gc(lua,LUA_GCSTEP,1);
+
+    if (err) {
+        addReplyErrorFormat(c,"Error running script: %s\n",  //  (call to %s)
+            /*funcname,*/ lua_tostring(lua,-1));
+        lua_pop(lua,2); /* Consume the Lua reply and remove error handler. */
+    } else {
+        /* On success convert the Lua return value into Redis protocol, and
+         * send it to * the client. */
+        luaReplyToRedisReply(c,lua); /* Convert and consume the reply. */
+        lua_pop(lua,1); /* Remove the error handler. */
+    }
+}
+
+struct thread_data {
+    redisClient *c;
+};
+
+static void *luaCallAndReplyThreadHandler(void * threadarg) {
+    struct thread_data *my_data;
+    redisLog(REDIS_WARNING,"from thread");
+    my_data = (struct thread_data *) threadarg;
+    luaCallAndReply(my_data->c);
+    redisLog(REDIS_WARNING,"thread ended");
+    pthread_exit(NULL);
+}
+
+void luaCallAndReplyInBackGround(redisClient *c) {
+    pthread_t thread;
+    int rc;
+    // void *status;
+    struct thread_data *data = zmalloc(sizeof(struct thread_data));
+    data->c = c;
+    redisLog(REDIS_WARNING,"Starting lthread");
+    rc = pthread_create(&thread, NULL, luaCallAndReplyThreadHandler, (void *) data);
+    redisLog(REDIS_WARNING,"thread started");
+    // pthread_join(thread, &status);
+    // redisLog(REDIS_WARNING,"thread joined");
+}
+
+
 void evalGenericCommand(redisClient *c, int evalsha) {
     lua_State *lua = server.lua;
     char funcname[43];
     long long numkeys;
-    int delhook = 0, err;
 
     /* We want the same PRNG sequence at every call so that our PRNG is
      * not affected by external state. */
@@ -898,46 +970,7 @@ void evalGenericCommand(redisClient *c, int evalsha) {
     /* Select the right DB in the context of the Lua client */
     selectDb(server.lua_client,c->db->id);
 
-    /* Set a hook in order to be able to stop the script execution if it
-     * is running for too much time.
-     * We set the hook only if the time limit is enabled as the hook will
-     * make the Lua script execution slower. */
-    server.lua_caller = c;
-    server.lua_time_start = mstime();
-    server.lua_kill = 0;
-    if (server.lua_time_limit > 0 && server.masterhost == NULL) {
-        lua_sethook(lua,luaMaskCountHook,LUA_MASKCOUNT,100000);
-        delhook = 1;
-    }
-
-    /* At this point whether this script was never seen before or if it was
-     * already defined, we can call it. We have zero arguments and expect
-     * a single return value. */
-    err = lua_pcall(lua,0,1,-2);
-
-    /* Perform some cleanup that we need to do both on error and success. */
-    if (delhook) lua_sethook(lua,luaMaskCountHook,0,0); /* Disable hook */
-    if (server.lua_timedout) {
-        server.lua_timedout = 0;
-        /* Restore the readable handler that was unregistered when the
-         * script timeout was detected. */
-        aeCreateFileEvent(server.el,c->fd,AE_READABLE,
-                          readQueryFromClient,c);
-    }
-    server.lua_caller = NULL;
-    selectDb(c,server.lua_client->db->id); /* set DB ID from Lua client */
-    lua_gc(lua,LUA_GCSTEP,1);
-
-    if (err) {
-        addReplyErrorFormat(c,"Error running script (call to %s): %s\n",
-            funcname, lua_tostring(lua,-1));
-        lua_pop(lua,2); /* Consume the Lua reply and remove error handler. */
-    } else {
-        /* On success convert the Lua return value into Redis protocol, and
-         * send it to * the client. */
-        luaReplyToRedisReply(c,lua); /* Convert and consume the reply. */
-        lua_pop(lua,1); /* Remove the error handler. */
-    }
+    luaCallAndReplyInBackGround(c);
 
     /* EVALSHA should be propagated to Slave and AOF file as full EVAL, unless
      * we are sure that the script was already in the context of all the
@@ -966,33 +999,8 @@ void evalGenericCommand(redisClient *c, int evalsha) {
     }
 }
 
-struct thread_data {
-    redisClient *c;
-    int         evalsha;
-};
-
-static void *evalGenericCommandThreadHandler(void * threadarg) {
-    struct thread_data *my_data;
-    redisLog(REDIS_WARNING,"from lua thread");
-    my_data = (struct thread_data *) threadarg;
-    evalGenericCommand(my_data->c, my_data->evalsha);
-    redisLog(REDIS_WARNING,"lua thread ended");
-    pthread_exit(NULL);
-}
-
-void evalGenericCommandInBackground(redisClient *c, int evalsha) {
-    pthread_t thread;
-    int rc;
-    struct thread_data *data = zmalloc(sizeof(struct thread_data));
-    data->c = c;
-    data->evalsha = evalsha;
-    redisLog(REDIS_WARNING,"Starting lua thread");
-    rc = pthread_create(&thread, NULL, evalGenericCommandThreadHandler, (void *) data);
-    redisLog(REDIS_WARNING,"lua thread started");
-}
-
 void evalCommand(redisClient *c) {
-    evalGenericCommandInBackground(c,0);
+    evalGenericCommand(c,0);
 }
 
 void evalShaCommand(redisClient *c) {
@@ -1004,7 +1012,7 @@ void evalShaCommand(redisClient *c) {
         addReply(c, shared.noscripterr);
         return;
     }
-    evalGenericCommandInBackground(c,1);
+    evalGenericCommand(c,1);
 }
 
 /* We replace math.random() with our implementation that is not affected
