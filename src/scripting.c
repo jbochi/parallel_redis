@@ -347,13 +347,22 @@ cleanup:
     return 1;
 }
 
-int luaRedisCallCommand(lua_State *lua) {
+int luaRedisCallCommandCont(lua_State *lua) {
     return luaRedisGenericCommand(lua,1);
 }
 
-int luaRedisPCallCommand(lua_State *lua) {
+int luaRedisPCallCommandCont(lua_State *lua) {
     return luaRedisGenericCommand(lua,0);
 }
+
+int luaRedisCallCommand(lua_State *lua) {
+    return lua_yieldk(lua,0,0,luaRedisCallCommandCont);
+}
+
+int luaRedisPCallCommand(lua_State *lua) {
+    return lua_yieldk(lua,0,0,luaRedisPCallCommandCont);
+}
+
 
 /* This adds redis.sha1hex(string) to Lua scripts using the same hashing
  * function used for sha1ing lua scripts. */
