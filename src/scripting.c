@@ -819,7 +819,7 @@ int luaCreateFunction(redisClient *c, lua_State *lua, char *funcname, robj *body
 
 void luaCallAndReply(redisClient *c) {
     lua_State *lua = server.lua_thread;
-    int delhook = 0, err;
+    int delhook = 0, status;
 
     /* Set a hook in order to be able to stop the script execution if it
      * is running for too much time.
@@ -836,8 +836,7 @@ void luaCallAndReply(redisClient *c) {
     /* Assume in the stack there is the function to be called
      * It should have zero arguments and we expect
      * a single return value. */
-    //err = lua_pcall(lua,0,1,-2);
-    err = lua_resume(lua, 0);
+    status = lua_resume(lua, 0);
 
     /* Perform some cleanup that we need to do both on error and success. */
     if (delhook) lua_sethook(lua,luaMaskCountHook,0,0); /* Disable hook */
@@ -852,16 +851,21 @@ void luaCallAndReply(redisClient *c) {
     selectDb(c,server.lua_client->db->id); /* set DB ID from Lua client */
     lua_gc(lua,LUA_GCSTEP,1);
 
-    if (err) {
+    while (status == LUA_YIELD) {
+        redisLog(REDIS_WARNING, "yielding?! Just keep working");
+        status = lua_resume(lua, 0);
+    }
+    if (status) {
+        // TODO: Use the error handler to get a better error message
         addReplyErrorFormat(c,"Error running script: %s\n",  //  (call to %s)
             /*funcname,*/ lua_tostring(lua,-1));
-        lua_pop(lua,2); /* Consume the Lua reply and remove error handler. */
+        lua_pop(lua, 1); /* Consume the Lua error string. */
     } else {
         /* On success convert the Lua return value into Redis protocol, and
          * send it to * the client. */
         luaReplyToRedisReply(c,lua); /* Convert and consume the reply. */
-        lua_pop(lua,1); /* Remove the error handler. */
     }
+    //TODO: Clean the lua thread. A reference to it is on the global state.
 }
 
 struct thread_data {
@@ -870,7 +874,6 @@ struct thread_data {
 
 static void *luaCallAndReplyThreadHandler(void * threadarg) {
     struct thread_data *my_data;
-    redisLog(REDIS_WARNING,"from thread");
     my_data = (struct thread_data *) threadarg;
     luaCallAndReply(my_data->c);
     redisLog(REDIS_WARNING,"thread ended");
@@ -880,10 +883,8 @@ static void *luaCallAndReplyThreadHandler(void * threadarg) {
 void luaCallAndReplyInBackGround(redisClient *c) {
     pthread_t thread;
     int rc;
-    // void *status;
     struct thread_data *data = zmalloc(sizeof(struct thread_data));
     data->c = c;
-    redisLog(REDIS_WARNING,"Starting lthread");
     rc = pthread_create(&thread, NULL, luaCallAndReplyThreadHandler, (void *) data);
     redisLog(REDIS_WARNING,"thread started");
     // pthread_join(thread, &status);
@@ -939,8 +940,6 @@ void evalGenericCommand(redisClient *c, int evalsha) {
         funcname[42] = '\0';
     }
 
-    /* Push the pcall error handler function on the stack. */
-    //lua_getglobal(lua, "__redis__err__handler");
 
     /* Try to lookup the Lua function */
     lua_getglobal(lua, funcname);
