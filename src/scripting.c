@@ -838,7 +838,7 @@ void luaCallAndReply(redisClient *c) {
     /* Assume in the stack there is the function to be called
      * It should have zero arguments and we expect
      * a single return value. */
-    status = lua_resume(lua, 0);
+    status = lua_resume(lua, NULL, 0);
 
     /* Perform some cleanup that we need to do both on error and success. */
     if (delhook) lua_sethook(lua,luaMaskCountHook,0,0); /* Disable hook */
@@ -855,7 +855,7 @@ void luaCallAndReply(redisClient *c) {
 
     while (status == LUA_YIELD) {
         redisLog(REDIS_WARNING, "yielding?! Just keep working");
-        status = lua_resume(lua, 0);
+        status = lua_resume(lua, NULL, 0);
     }
     if (status) {
         // TODO: Use the error handler to get a better error message
