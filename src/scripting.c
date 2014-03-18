@@ -238,6 +238,7 @@ int luaRedisGenericCommandCont(lua_State *lua, int raise_error) {
     if (reply == NULL) {
         reply = luaRedisCommandReply(c);
     }
+    redisLog(REDIS_WARNING, "Reply that will be returned: %s", reply);
 
     if (raise_error && reply[0] != '-') raise_error = 0;
     redisProtocolToLuaType(lua,reply);
@@ -865,20 +866,21 @@ int luaCreateFunction(redisClient *c, lua_State *lua, char *funcname, robj *body
 }
 
 // TODO: proper forward declaration
-void luaCallAndReply(redisClient *c);
+void luaCallAndReplyInBackGround(redisClient *c);
 
 int resumeLuaThread(struct aeEventLoop *eventLoop, long long id, void *clientData) {
-    redisClient *c = (redisClient*) clientData;
+    // redisClient *c = (redisClient*) clientData;
+    redisClient *c = server.lua_client;
 
-    redisLog(REDIS_WARNING, "Hey, I'm the main thread. I will resume the lua thread");
+    redisLog(REDIS_WARNING, "Hey, I'm the main thread. I will resume the lua thread (%p)", c);
     redisLog(REDIS_WARNING, "script_cmd: %p", server.script_cmd);
-    // if (server.script_cmd) {
-    //     redisLog(REDIS_WARNING, "Still main thread here. I will let the reply ready for you");
-    //     server.script_reply = luaRedisCommandReply(c);
-    //     redisLog(REDIS_WARNING, "Set reply: %s", server.script_reply);
-    // }
+    if (server.script_cmd) {
+        redisLog(REDIS_WARNING, "Still main thread here. I will let the reply ready for you");
+        server.script_reply = luaRedisCommandReply(c);
+        redisLog(REDIS_WARNING, "Set reply: %s", server.script_reply);
+    }
 
-    luaCallAndReply(c);
+    luaCallAndReplyInBackGround(c);
     return -1;
 }
 
@@ -915,7 +917,7 @@ void luaCallAndReply(redisClient *c) {
     lua_gc(lua,LUA_GCSTEP,1);
 
     if (status == LUA_YIELD) {
-        redisLog(REDIS_WARNING, "yielding? Thanks. I will resume from event loop");
+        redisLog(REDIS_WARNING, "yielding? Thanks. I will resume from event loop (%p)", c);
         aeCreateTimeEvent(server.el,1,resumeLuaThread,c,NULL);
     } else if (status != LUA_OK) {
         // TODO: Use the error handler to get a better error message
