@@ -837,6 +837,10 @@ struct redisServer {
     int lua_timedout;     /* True if we reached the time limit for script
                              execution. */
     int lua_kill;         /* Kill the script if true. */
+
+    struct redisCommand *script_cmd, *script_lastcmd;
+    sds script_reply;
+
     /* Assert & bug reporting */
     char *assert_failed;
     char *assert_file;

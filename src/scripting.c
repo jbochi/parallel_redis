@@ -205,7 +205,11 @@ sds luaRedisCommandReply(redisClient *c) {
     sds reply;
 
     /* Run the command */
+    c->cmd = server.script_cmd;
+    redisLog(REDIS_WARNING, "Executing command!");
     call(c,REDIS_CALL_SLOWLOG | REDIS_CALL_STATS);
+    server.script_lastcmd = server.script_cmd;
+    server.script_cmd = NULL;
 
     /* Convert the result of the Redis command into a suitable Lua type.
      * The first thing we need is to create a single string from the client
@@ -227,19 +231,25 @@ sds luaRedisCommandReply(redisClient *c) {
 int luaRedisGenericCommandCont(lua_State *lua, int raise_error) {
     int j;
     redisClient *c = server.lua_client;
-    struct redisCommand *cmd = c->cmd;
-    sds reply = luaRedisCommandReply(c);
+    sds reply = server.script_reply;
+
+    redisLog(REDIS_WARNING, "Redis command continuing...");
+    redisLog(REDIS_WARNING, "Existing reply: %s", reply);
+    if (reply == NULL) {
+        reply = luaRedisCommandReply(c);
+    }
 
     if (raise_error && reply[0] != '-') raise_error = 0;
     redisProtocolToLuaType(lua,reply);
 
     /* Sort the output array if needed, assuming it is a non-null multi bulk
      * reply as expected. */
-    if ((cmd->flags & REDIS_CMD_SORT_FOR_SCRIPT) &&
+    if ((server.script_lastcmd->flags & REDIS_CMD_SORT_FOR_SCRIPT) &&
         (reply[0] == '*' && reply[1] != '-')) {
             luaSortArray(lua);
     }
     sdsfree(reply);
+    server.script_reply = NULL;
     c->reply_bytes = 0;
 
     // Clean up argc and v
@@ -357,7 +367,8 @@ int luaRedisGenericCommand(lua_State *lua, int raise_error) {
     if (cmd->flags & REDIS_CMD_WRITE) server.lua_write_dirty = 1;
 
     // Yield, and let the command be executed when thread is resumed
-    c->cmd = cmd;
+    server.script_cmd = cmd;
+    redisLog(REDIS_WARNING, "script_cmd: %p", server.script_cmd);
     if (raise_error) {
         return lua_yieldk(lua,0,0,luaRedisCallCommandCont);
     } else {
@@ -853,14 +864,21 @@ int luaCreateFunction(redisClient *c, lua_State *lua, char *funcname, robj *body
     return REDIS_OK;
 }
 
-// TODO: forward declaration
-void luaCallAndReplyInBackGround(redisClient *c);
+// TODO: proper forward declaration
+void luaCallAndReply(redisClient *c);
 
 int resumeLuaThread(struct aeEventLoop *eventLoop, long long id, void *clientData) {
     redisClient *c = (redisClient*) clientData;
 
     redisLog(REDIS_WARNING, "Hey, I'm the main thread. I will resume the lua thread");
-    luaCallAndReplyInBackGround(c);
+    redisLog(REDIS_WARNING, "script_cmd: %p", server.script_cmd);
+    // if (server.script_cmd) {
+    //     redisLog(REDIS_WARNING, "Still main thread here. I will let the reply ready for you");
+    //     server.script_reply = luaRedisCommandReply(c);
+    //     redisLog(REDIS_WARNING, "Set reply: %s", server.script_reply);
+    // }
+
+    luaCallAndReply(c);
     return -1;
 }
 
