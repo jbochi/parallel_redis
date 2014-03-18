@@ -827,6 +827,16 @@ int luaCreateFunction(redisClient *c, lua_State *lua, char *funcname, robj *body
     return REDIS_OK;
 }
 
+// TODO: forward declaration
+void luaCallAndReply(redisClient *c);
+
+int resumeLuaThread(struct aeEventLoop *eventLoop, long long id, void *clientData) {
+    redisClient *c = (redisClient*) clientData;
+
+    redisLog(REDIS_WARNING, "Hey, I'm the main thread and I will resume your lua call :-)");
+    luaCallAndReply(c);
+    return -1;
+}
 
 void luaCallAndReply(redisClient *c) {
     lua_State *lua = server.lua_thread;
@@ -844,10 +854,8 @@ void luaCallAndReply(redisClient *c) {
         delhook = 1;
     }
 
-    /* Assume in the stack there is the function to be called
-     * It should have zero arguments and we expect
-     * a single return value. */
-    status = lua_resume(lua, NULL, 0);
+    /* Assume in the stack there is a thread waiting to be resumed. */
+    status = lua_resume(lua,NULL,0);
 
     /* Perform some cleanup that we need to do both on error and success. */
     if (delhook) lua_sethook(lua,luaMaskCountHook,0,0); /* Disable hook */
@@ -862,11 +870,10 @@ void luaCallAndReply(redisClient *c) {
     selectDb(c,server.lua_client->db->id); /* set DB ID from Lua client */
     lua_gc(lua,LUA_GCSTEP,1);
 
-    while (status == LUA_YIELD) {
-        redisLog(REDIS_WARNING, "yielding?! Just keep working");
-        status = lua_resume(lua, NULL, 0);
-    }
-    if (status) {
+    if (status == LUA_YIELD) {
+        redisLog(REDIS_WARNING, "yielding? Thanks. I will resume from event loop");
+        aeCreateTimeEvent(server.el,1,resumeLuaThread,c,NULL);
+    } else if (status != LUA_OK) {
         // TODO: Use the error handler to get a better error message
         addReplyErrorFormat(c,"Error running script: %s\n",  //  (call to %s)
             /*funcname,*/ lua_tostring(lua,-1));
