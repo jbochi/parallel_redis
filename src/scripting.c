@@ -201,12 +201,68 @@ void luaSortArray(lua_State *lua) {
     lua_pop(lua,1);             /* Stack: array (sorted) */
 }
 
+sds luaRedisCommandReply(redisClient *c) {
+    sds reply;
+
+    /* Run the command */
+    call(c,REDIS_CALL_SLOWLOG | REDIS_CALL_STATS);
+
+    /* Convert the result of the Redis command into a suitable Lua type.
+     * The first thing we need is to create a single string from the client
+     * output buffers. */
+    reply = sdsempty();
+    if (c->bufpos) {
+        reply = sdscatlen(reply,c->buf,c->bufpos);
+        c->bufpos = 0;
+    }
+    while(listLength(c->reply)) {
+        robj *o = listNodeValue(listFirst(c->reply));
+
+        reply = sdscatlen(reply,o->ptr,sdslen(o->ptr));
+        listDelNode(c->reply,listFirst(c->reply));
+    }
+    return reply;
+}
+
+int luaRedisGenericCommandCont(lua_State *lua, int raise_error) {
+    int j;
+    redisClient *c = server.lua_client;
+    struct redisCommand *cmd = c->cmd;
+    sds reply = luaRedisCommandReply(c);
+
+    if (raise_error && reply[0] != '-') raise_error = 0;
+    redisProtocolToLuaType(lua,reply);
+
+    /* Sort the output array if needed, assuming it is a non-null multi bulk
+     * reply as expected. */
+    if ((cmd->flags & REDIS_CMD_SORT_FOR_SCRIPT) &&
+        (reply[0] == '*' && reply[1] != '-')) {
+            luaSortArray(lua);
+    }
+    sdsfree(reply);
+    c->reply_bytes = 0;
+
+    // Clean up argc and v
+    for (j = 0; j < c->argc; j++)
+        decrRefCount(c->argv[j]);
+    zfree(c->argv);
+
+    return 1;
+}
+
+int luaRedisPCallCommandCont(lua_State *lua) {
+    return luaRedisGenericCommandCont(lua, 0);
+}
+
+int luaRedisCallCommandCont(lua_State *lua) {
+    return luaRedisGenericCommandCont(lua, 1);
+}
+
 int luaRedisGenericCommand(lua_State *lua, int raise_error) {
     int j, argc = lua_gettop(lua);
     struct redisCommand *cmd;
     robj **argv;
     redisClient *c = server.lua_client;
-    sds reply;
 
     /* Require at least one argument */
     if (argc == 0) {
@@ -300,34 +356,13 @@ int luaRedisGenericCommand(lua_State *lua, int raise_error) {
     if (cmd->flags & REDIS_CMD_RANDOM) server.lua_random_dirty = 1;
     if (cmd->flags & REDIS_CMD_WRITE) server.lua_write_dirty = 1;
 
-    /* Run the command */
+    // Yield, and let the command be executed when thread is resumed
     c->cmd = cmd;
-    call(c,REDIS_CALL_SLOWLOG | REDIS_CALL_STATS);
-
-    /* Convert the result of the Redis command into a suitable Lua type.
-     * The first thing we need is to create a single string from the client
-     * output buffers. */
-    reply = sdsempty();
-    if (c->bufpos) {
-        reply = sdscatlen(reply,c->buf,c->bufpos);
-        c->bufpos = 0;
+    if (raise_error) {
+        return lua_yieldk(lua,0,0,luaRedisCallCommandCont);
+    } else {
+        return lua_yieldk(lua,0,0,luaRedisPCallCommandCont);
     }
-    while(listLength(c->reply)) {
-        robj *o = listNodeValue(listFirst(c->reply));
-
-        reply = sdscatlen(reply,o->ptr,sdslen(o->ptr));
-        listDelNode(c->reply,listFirst(c->reply));
-    }
-    if (raise_error && reply[0] != '-') raise_error = 0;
-    redisProtocolToLuaType(lua,reply);
-    /* Sort the output array if needed, assuming it is a non-null multi bulk
-     * reply as expected. */
-    if ((cmd->flags & REDIS_CMD_SORT_FOR_SCRIPT) &&
-        (reply[0] == '*' && reply[1] != '-')) {
-            luaSortArray(lua);
-    }
-    sdsfree(reply);
-    c->reply_bytes = 0;
 
 cleanup:
     /* Clean up. Command code may have changed argv/argc so we use the
@@ -347,22 +382,13 @@ cleanup:
     return 1;
 }
 
-int luaRedisCallCommandCont(lua_State *lua) {
+int luaRedisCallCommand(lua_State *lua) {
     return luaRedisGenericCommand(lua,1);
 }
 
-int luaRedisPCallCommandCont(lua_State *lua) {
+int luaRedisPCallCommand(lua_State *lua) {
     return luaRedisGenericCommand(lua,0);
 }
-
-int luaRedisCallCommand(lua_State *lua) {
-    return lua_yieldk(lua,0,0,luaRedisCallCommandCont);
-}
-
-int luaRedisPCallCommand(lua_State *lua) {
-    return lua_yieldk(lua,0,0,luaRedisPCallCommandCont);
-}
-
 
 /* This adds redis.sha1hex(string) to Lua scripts using the same hashing
  * function used for sha1ing lua scripts. */
@@ -828,13 +854,13 @@ int luaCreateFunction(redisClient *c, lua_State *lua, char *funcname, robj *body
 }
 
 // TODO: forward declaration
-void luaCallAndReply(redisClient *c);
+void luaCallAndReplyInBackGround(redisClient *c);
 
 int resumeLuaThread(struct aeEventLoop *eventLoop, long long id, void *clientData) {
     redisClient *c = (redisClient*) clientData;
 
-    redisLog(REDIS_WARNING, "Hey, I'm the main thread and I will resume your lua call :-)");
-    luaCallAndReply(c);
+    redisLog(REDIS_WARNING, "Hey, I'm the main thread. I will resume the lua thread");
+    luaCallAndReplyInBackGround(c);
     return -1;
 }
 
