@@ -818,7 +818,7 @@ int luaCreateFunction(redisClient *c, lua_State *lua, char *funcname, robj *body
 
 
 void luaCallAndReply(redisClient *c) {
-    lua_State *lua = server.lua;
+    lua_State *lua = server.lua_thread;
     int delhook = 0, err;
 
     /* Set a hook in order to be able to stop the script execution if it
@@ -836,7 +836,8 @@ void luaCallAndReply(redisClient *c) {
     /* Assume in the stack there is the function to be called
      * It should have zero arguments and we expect
      * a single return value. */
-    err = lua_pcall(lua,0,1,-2);
+    //err = lua_pcall(lua,0,1,-2);
+    err = lua_resume(lua, 0);
 
     /* Perform some cleanup that we need to do both on error and success. */
     if (delhook) lua_sethook(lua,luaMaskCountHook,0,0); /* Disable hook */
@@ -892,6 +893,8 @@ void luaCallAndReplyInBackGround(redisClient *c) {
 
 void evalGenericCommand(redisClient *c, int evalsha) {
     lua_State *lua = server.lua;
+    lua_State *lua_thread;
+
     char funcname[43];
     long long numkeys;
 
@@ -937,35 +940,36 @@ void evalGenericCommand(redisClient *c, int evalsha) {
     }
 
     /* Push the pcall error handler function on the stack. */
-    lua_getglobal(lua, "__redis__err__handler");
+    //lua_getglobal(lua, "__redis__err__handler");
 
     /* Try to lookup the Lua function */
     lua_getglobal(lua, funcname);
     if (lua_isnil(lua,-1)) {
-        lua_pop(lua,1); /* remove the nil from the stack */
         /* Function not defined... let's define it if we have the
          * body of the function. If this is an EVALSHA call we can just
          * return an error. */
         if (evalsha) {
-            lua_pop(lua,1); /* remove the error handler from the stack. */
             addReply(c, shared.noscripterr);
             return;
         }
         if (luaCreateFunction(c,lua,funcname,c->argv[1]) == REDIS_ERR) {
-            lua_pop(lua,1); /* remove the error handler from the stack. */
             /* The error is sent to the client by luaCreateFunction()
              * itself when it returns REDIS_ERR. */
             return;
         }
-        /* Now the following is guaranteed to return non nil */
-        lua_getglobal(lua, funcname);
-        redisAssert(!lua_isnil(lua,-1));
     }
+    lua_pop(lua,1); /* remove the function or nil from the stack */
+
+    /* Start a new thread and push the function into the stack */
+    lua_thread = lua_newthread(lua);
+    server.lua_thread = lua_thread;
+    lua_getglobal(lua_thread, funcname);
+    redisAssert(!lua_isnil(lua,-1));
 
     /* Populate the argv and keys table accordingly to the arguments that
      * EVAL received. */
-    luaSetGlobalArray(lua,"KEYS",c->argv+3,numkeys);
-    luaSetGlobalArray(lua,"ARGV",c->argv+3+numkeys,c->argc-3-numkeys);
+    luaSetGlobalArray(lua_thread,"KEYS",c->argv+3,numkeys);
+    luaSetGlobalArray(lua_thread,"ARGV",c->argv+3+numkeys,c->argc-3-numkeys);
 
     /* Select the right DB in the context of the Lua client */
     selectDb(server.lua_client,c->db->id);

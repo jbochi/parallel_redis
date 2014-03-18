@@ -824,6 +824,7 @@ struct redisServer {
     int cluster_migration_barrier; /* Cluster replicas migration barrier. */
     /* Scripting */
     lua_State *lua; /* The Lua interpreter. We use just one for all clients */
+    lua_State *lua_thread;
     redisClient *lua_client;   /* The "fake client" to query Redis from Lua */
     redisClient *lua_caller;   /* The client running EVAL right now, or NULL */
     dict *lua_scripts;         /* A dictionary of SHA1 -> Lua scripts */
