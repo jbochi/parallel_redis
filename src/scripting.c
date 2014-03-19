@@ -201,12 +201,13 @@ void luaSortArray(lua_State *lua) {
     lua_pop(lua,1);             /* Stack: array (sorted) */
 }
 
-sds luaRedisCommandReply(redisClient *c) {
+sds luaRedisCommandReply() {
+    int j;
+    redisClient *c = server.lua_client;
     sds reply;
 
     /* Run the command */
     c->cmd = server.script_cmd;
-    redisLog(REDIS_WARNING, "Executing command!");
     call(c,REDIS_CALL_SLOWLOG | REDIS_CALL_STATS);
     server.script_lastcmd = server.script_cmd;
     server.script_cmd = NULL;
@@ -225,21 +226,21 @@ sds luaRedisCommandReply(redisClient *c) {
         reply = sdscatlen(reply,o->ptr,sdslen(o->ptr));
         listDelNode(c->reply,listFirst(c->reply));
     }
+
+    c->reply_bytes = 0;
+    // Clean up argc and v
+    for (j = 0; j < c->argc; j++)
+        decrRefCount(c->argv[j]);
+    zfree(c->argv);
+
     return reply;
 }
 
 int luaRedisGenericCommandCont(lua_State *lua, int raise_error) {
-    int j;
-    redisClient *c = server.lua_client;
     sds reply = server.script_reply;
-
-    redisLog(REDIS_WARNING, "Redis command continuing...");
-    redisLog(REDIS_WARNING, "Existing reply: %s", reply);
     if (reply == NULL) {
-        reply = luaRedisCommandReply(c);
+        reply = luaRedisCommandReply();
     }
-    redisLog(REDIS_WARNING, "Reply that will be returned: %s", reply);
-
     if (raise_error && reply[0] != '-') raise_error = 0;
     redisProtocolToLuaType(lua,reply);
 
@@ -251,13 +252,6 @@ int luaRedisGenericCommandCont(lua_State *lua, int raise_error) {
     }
     sdsfree(reply);
     server.script_reply = NULL;
-    c->reply_bytes = 0;
-
-    // Clean up argc and v
-    for (j = 0; j < c->argc; j++)
-        decrRefCount(c->argv[j]);
-    zfree(c->argv);
-
     return 1;
 }
 
@@ -369,7 +363,7 @@ int luaRedisGenericCommand(lua_State *lua, int raise_error) {
 
     // Yield, and let the command be executed when thread is resumed
     server.script_cmd = cmd;
-    redisLog(REDIS_WARNING, "script_cmd: %p", server.script_cmd);
+    redisLog(REDIS_WARNING, "Redis command called. Yielding");
     if (raise_error) {
         return lua_yieldk(lua,0,0,luaRedisCallCommandCont);
     } else {
@@ -869,15 +863,11 @@ int luaCreateFunction(redisClient *c, lua_State *lua, char *funcname, robj *body
 void luaCallAndReplyInBackGround(redisClient *c);
 
 int resumeLuaThread(struct aeEventLoop *eventLoop, long long id, void *clientData) {
-    // redisClient *c = (redisClient*) clientData;
-    redisClient *c = server.lua_client;
+    redisClient *c = (redisClient*) clientData;
 
-    redisLog(REDIS_WARNING, "Hey, I'm the main thread. I will resume the lua thread (%p)", c);
-    redisLog(REDIS_WARNING, "script_cmd: %p", server.script_cmd);
     if (server.script_cmd) {
-        redisLog(REDIS_WARNING, "Still main thread here. I will let the reply ready for you");
-        server.script_reply = luaRedisCommandReply(c);
-        redisLog(REDIS_WARNING, "Set reply: %s", server.script_reply);
+        redisLog(REDIS_WARNING, "Main thread executing redis command");
+        server.script_reply = luaRedisCommandReply();
     }
 
     luaCallAndReplyInBackGround(c);
@@ -917,7 +907,8 @@ void luaCallAndReply(redisClient *c) {
     lua_gc(lua,LUA_GCSTEP,1);
 
     if (status == LUA_YIELD) {
-        redisLog(REDIS_WARNING, "yielding? Thanks. I will resume from event loop (%p)", c);
+        // If the Lua script yields, we create a time event to run any
+        // pending Redis command inside the event loop
         aeCreateTimeEvent(server.el,1,resumeLuaThread,c,NULL);
     } else if (status != LUA_OK) {
         // TODO: Use the error handler to get a better error message
