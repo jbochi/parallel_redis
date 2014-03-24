@@ -742,8 +742,14 @@ void luaReplyToRedisReply(redisClient *c, lua_State *lua) {
 
     switch(t) {
     case LUA_TSTRING:
-        addReplyBulkCBuffer(c,(char*)lua_tostring(lua,-1),lua_rawlen(lua,-1));
-        break;
+        //addReplyBulkCBuffer(c,(char*)lua_tostring(lua,-1),lua_rawlen(lua,-1));
+        {
+            sds luastr = sdsnewlen((char*)lua_tostring(lua,-1),lua_rawlen(lua,-1));
+            sdsmapchars(luastr,"\r\n","  ",2);
+            addReplySds(c,sdscatprintf(sdsempty(),"+%s\r\n",luastr));
+            sdsfree(luastr);
+            break;
+        }
     case LUA_TBOOLEAN:
         addReply(c,lua_toboolean(lua,-1) ? shared.cone : shared.nullbulk);
         break;
