@@ -911,7 +911,7 @@ void luaCallAndReply(redisClient *c) {
         // If the Lua script yields, we create a time event to run any
         // pending Redis command inside the event loop
         redisLog(REDIS_WARNING,"creating time event");
-        aeCreateTimeEvent(server.el,1,resumeLuaThread,c,NULL);
+        aeCreateTimeEvent(server.el,0,resumeLuaThread,c,NULL);
     } else if (status != LUA_OK) {
         // TODO: Use the error handler to get a better error message
         addReplyErrorFormat(c,"Error running script: %s\n",  //  (call to %s)
