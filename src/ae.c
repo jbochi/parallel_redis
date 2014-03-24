@@ -113,7 +113,12 @@ int aeResizeSetSize(aeEventLoop *eventLoop, int setsize) {
 
     if (setsize == eventLoop->setsize) return AE_OK;
     if (eventLoop->maxfd >= setsize) return AE_ERR;
-    if (aeApiResize(eventLoop,setsize) == -1) return AE_ERR;
+
+    pthread_mutex_lock(&eventLoop->mutexFileEvents);
+    if (aeApiResize(eventLoop,setsize) == -1) {
+        pthread_mutex_unlock(&eventLoop->mutexFileEvents);
+        return AE_ERR;
+    }
 
     eventLoop->events = zrealloc(eventLoop->events,sizeof(aeFileEvent)*setsize);
     eventLoop->fired = zrealloc(eventLoop->fired,sizeof(aeFiredEvent)*setsize);
@@ -123,6 +128,7 @@ int aeResizeSetSize(aeEventLoop *eventLoop, int setsize) {
      * an AE_NONE mask. */
     for (i = eventLoop->maxfd+1; i < setsize; i++)
         eventLoop->events[i].mask = AE_NONE;
+    pthread_mutex_unlock(&eventLoop->mutexFileEvents);
     return AE_OK;
 }
 
@@ -192,9 +198,11 @@ void aeDeleteFileEvent(aeEventLoop *eventLoop, int fd, int mask)
 }
 
 int aeGetFileEvents(aeEventLoop *eventLoop, int fd) {
+    pthread_mutex_lock(&eventLoop->mutexFileEvents);
     if (fd >= eventLoop->setsize) return 0;
     aeFileEvent *fe = &eventLoop->events[fd];
 
+    pthread_mutex_unlock(&eventLoop->mutexFileEvents);
     return fe->mask;
 }
 
