@@ -863,7 +863,8 @@ int luaCreateFunction(redisClient *c, lua_State *lua, char *funcname, robj *body
 // TODO: proper forward declaration
 void luaCallAndReplyInBackGround(redisClient *c);
 
-int resumeLuaThread(struct aeEventLoop *eventLoop, long long id, void *clientData) {
+
+void resumeLuaThread(aeEventLoop *el, int fd, void *clientData, int mask) {
     redisClient *c = (redisClient*) clientData;
 
     redisLog(REDIS_WARNING, "Time event called");
@@ -872,8 +873,8 @@ int resumeLuaThread(struct aeEventLoop *eventLoop, long long id, void *clientDat
         server.script_reply = luaRedisCommandReply();
     }
 
+    aeDeleteFileEvent(el, fd, mask);
     luaCallAndReplyInBackGround(c);
-    return -1;
 }
 
 void luaCallAndReply(redisClient *c) {
@@ -912,7 +913,7 @@ void luaCallAndReply(redisClient *c) {
         // If the Lua script yields, we create a time event to run any
         // pending Redis command inside the event loop
         redisLog(REDIS_WARNING,"creating time event");
-        aeCreateTimeEvent(server.el,0,resumeLuaThread,c,NULL);
+        aeCreateFileEvent(server.el,c->fd,AE_WRITABLE,resumeLuaThread,c);
     } else if (status != LUA_OK) {
         // TODO: Use the error handler to get a better error message
         addReplyErrorFormat(c,"Error running script: %s\n",  //  (call to %s)
