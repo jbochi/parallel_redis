@@ -783,22 +783,17 @@ void luaReplyToRedisReply(redisClient *c, lua_State *lua) {
             sdsfree(ok);
             lua_pop(lua,1);
         } else {
-            void *replylen = addDeferredMultiBulkLength(c);
-            int j = 1, mbulklen = 0;
-
+            int j;
+            long mbulklen;
             lua_pop(lua,1); /* Discard the 'ok' field value we popped */
-            while(1) {
-                lua_pushnumber(lua,j++);
+
+            mbulklen = lua_rawlen(lua, -1);
+            addReplyMultiBulkLen(c,mbulklen);
+            for (j = 1; j <= mbulklen; j++) {
+                lua_pushnumber(lua,j);
                 lua_gettable(lua,-2);
-                t = lua_type(lua,-1);
-                if (t == LUA_TNIL) {
-                    lua_pop(lua,1);
-                    break;
-                }
                 luaReplyToRedisReply(c, lua);
-                mbulklen++;
             }
-            setDeferredMultiBulkLength(c,replylen,mbulklen);
         }
         break;
     default:
