@@ -80,6 +80,11 @@ aeEventLoop *aeCreateEventLoop(int setsize) {
      * vector with it. */
     for (i = 0; i < setsize; i++)
         eventLoop->events[i].mask = AE_NONE;
+
+    pthread_mutexattr_settype(&eventLoop->mutexAttr, PTHREAD_MUTEX_RECURSIVE);
+    pthread_mutex_init(&eventLoop->mutexFileEvents, &eventLoop->mutexAttr);
+    pthread_mutex_init(&eventLoop->mutexTimeEvents, &eventLoop->mutexAttr);
+
     return eventLoop;
 
 err:
@@ -122,6 +127,8 @@ int aeResizeSetSize(aeEventLoop *eventLoop, int setsize) {
 }
 
 void aeDeleteEventLoop(aeEventLoop *eventLoop) {
+    pthread_mutex_destroy(&eventLoop->mutexFileEvents);
+    pthread_mutex_destroy(&eventLoop->mutexTimeEvents);
     aeApiFree(eventLoop);
     zfree(eventLoop->events);
     zfree(eventLoop->fired);
@@ -391,6 +398,7 @@ int aeProcessEvents(aeEventLoop *eventLoop, int flags)
     if (!(flags & AE_TIME_EVENTS) && !(flags & AE_FILE_EVENTS)) return 0;
 
     pthread_mutex_lock(&eventLoop->mutexFileEvents);
+    pthread_mutex_lock(&eventLoop->mutexTimeEvents);
 
     /* Note that we want call select() even if there are no
      * file events to process as long as we want to process time
@@ -454,11 +462,13 @@ int aeProcessEvents(aeEventLoop *eventLoop, int flags)
             processed++;
         }
     }
-    pthread_mutex_unlock(&eventLoop->mutexFileEvents);
 
     /* Check time events */
     if (flags & AE_TIME_EVENTS)
         processed += processTimeEvents(eventLoop);
+
+    pthread_mutex_unlock(&eventLoop->mutexFileEvents);
+    pthread_mutex_unlock(&eventLoop->mutexTimeEvents);
 
     return processed; /* return the number of processed file/time events */
 }

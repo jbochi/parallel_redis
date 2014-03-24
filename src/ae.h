@@ -99,6 +99,7 @@ typedef struct aeEventLoop {
     aeBeforeSleepProc *beforesleep;
     pthread_mutex_t mutexTimeEvents;
     pthread_mutex_t mutexFileEvents;
+    pthread_mutexattr_t mutexAttr;
 } aeEventLoop;
 
 /* Prototypes */
