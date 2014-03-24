@@ -865,6 +865,7 @@ void luaCallAndReplyInBackGround(redisClient *c);
 int resumeLuaThread(struct aeEventLoop *eventLoop, long long id, void *clientData) {
     redisClient *c = (redisClient*) clientData;
 
+    redisLog(REDIS_WARNING, "Time event called");
     if (server.script_cmd) {
         redisLog(REDIS_WARNING, "Main thread executing redis command");
         server.script_reply = luaRedisCommandReply();
@@ -909,6 +910,7 @@ void luaCallAndReply(redisClient *c) {
     if (status == LUA_YIELD) {
         // If the Lua script yields, we create a time event to run any
         // pending Redis command inside the event loop
+        redisLog(REDIS_WARNING,"creating time event");
         aeCreateTimeEvent(server.el,1,resumeLuaThread,c,NULL);
     } else if (status != LUA_OK) {
         // TODO: Use the error handler to get a better error message

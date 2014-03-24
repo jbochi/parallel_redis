@@ -135,29 +135,42 @@ void aeStop(aeEventLoop *eventLoop) {
 int aeCreateFileEvent(aeEventLoop *eventLoop, int fd, int mask,
         aeFileProc *proc, void *clientData)
 {
+    pthread_mutex_lock(&eventLoop->mutexTimeEvents);
     if (fd >= eventLoop->setsize) {
         errno = ERANGE;
+        pthread_mutex_unlock(&eventLoop->mutexTimeEvents);
         return AE_ERR;
     }
     aeFileEvent *fe = &eventLoop->events[fd];
 
-    if (aeApiAddEvent(eventLoop, fd, mask) == -1)
+    if (aeApiAddEvent(eventLoop, fd, mask) == -1) {
+        pthread_mutex_unlock(&eventLoop->mutexTimeEvents);
         return AE_ERR;
+    }
     fe->mask |= mask;
     if (mask & AE_READABLE) fe->rfileProc = proc;
     if (mask & AE_WRITABLE) fe->wfileProc = proc;
     fe->clientData = clientData;
     if (fd > eventLoop->maxfd)
         eventLoop->maxfd = fd;
+
+    pthread_mutex_unlock(&eventLoop->mutexTimeEvents);
     return AE_OK;
 }
 
 void aeDeleteFileEvent(aeEventLoop *eventLoop, int fd, int mask)
 {
-    if (fd >= eventLoop->setsize) return;
+    pthread_mutex_lock(&eventLoop->mutexTimeEvents);
+    if (fd >= eventLoop->setsize) {
+        pthread_mutex_unlock(&eventLoop->mutexTimeEvents);
+        return;
+    }
     aeFileEvent *fe = &eventLoop->events[fd];
 
-    if (fe->mask == AE_NONE) return;
+    if (fe->mask == AE_NONE) {
+        pthread_mutex_unlock(&eventLoop->mutexTimeEvents);
+        return;
+    }
     fe->mask = fe->mask & (~mask);
     if (fd == eventLoop->maxfd && fe->mask == AE_NONE) {
         /* Update the max fd */
@@ -168,6 +181,7 @@ void aeDeleteFileEvent(aeEventLoop *eventLoop, int fd, int mask)
         eventLoop->maxfd = j;
     }
     aeApiDelEvent(eventLoop, fd, mask);
+    pthread_mutex_unlock(&eventLoop->mutexTimeEvents);
 }
 
 int aeGetFileEvents(aeEventLoop *eventLoop, int fd) {
@@ -204,6 +218,8 @@ long long aeCreateTimeEvent(aeEventLoop *eventLoop, long long milliseconds,
         aeTimeProc *proc, void *clientData,
         aeEventFinalizerProc *finalizerProc)
 {
+    pthread_mutex_lock(&eventLoop->mutexTimeEvents);
+
     long long id = eventLoop->timeEventNextId++;
     aeTimeEvent *te;
 
@@ -216,12 +232,17 @@ long long aeCreateTimeEvent(aeEventLoop *eventLoop, long long milliseconds,
     te->clientData = clientData;
     te->next = eventLoop->timeEventHead;
     eventLoop->timeEventHead = te;
+
+    pthread_mutex_unlock(&eventLoop->mutexTimeEvents);
+
     return id;
 }
 
 int aeDeleteTimeEvent(aeEventLoop *eventLoop, long long id)
 {
     aeTimeEvent *te, *prev = NULL;
+
+    pthread_mutex_lock(&eventLoop->mutexTimeEvents);
 
     te = eventLoop->timeEventHead;
     while(te) {
@@ -238,6 +259,9 @@ int aeDeleteTimeEvent(aeEventLoop *eventLoop, long long id)
         prev = te;
         te = te->next;
     }
+
+    pthread_mutex_unlock(&eventLoop->mutexTimeEvents);
+
     return AE_ERR; /* NO event with the specified ID found */
 }
 
@@ -257,6 +281,8 @@ static aeTimeEvent *aeSearchNearestTimer(aeEventLoop *eventLoop)
     aeTimeEvent *te = eventLoop->timeEventHead;
     aeTimeEvent *nearest = NULL;
 
+    pthread_mutex_lock(&eventLoop->mutexTimeEvents);
+
     while(te) {
         if (!nearest || te->when_sec < nearest->when_sec ||
                 (te->when_sec == nearest->when_sec &&
@@ -264,6 +290,9 @@ static aeTimeEvent *aeSearchNearestTimer(aeEventLoop *eventLoop)
             nearest = te;
         te = te->next;
     }
+
+    pthread_mutex_unlock(&eventLoop->mutexTimeEvents);
+
     return nearest;
 }
 
@@ -273,6 +302,8 @@ static int processTimeEvents(aeEventLoop *eventLoop) {
     aeTimeEvent *te;
     long long maxId;
     time_t now = time(NULL);
+
+    pthread_mutex_lock(&eventLoop->mutexTimeEvents);
 
     /* If the system clock is moved to the future, and then set back to the
      * right value, time events may be delayed in a random way. Often this
@@ -333,6 +364,9 @@ static int processTimeEvents(aeEventLoop *eventLoop) {
             te = te->next;
         }
     }
+
+    pthread_mutex_unlock(&eventLoop->mutexTimeEvents);
+
     return processed;
 }
 
@@ -397,6 +431,7 @@ int aeProcessEvents(aeEventLoop *eventLoop, int flags)
             }
         }
 
+        pthread_mutex_lock(&eventLoop->mutexTimeEvents);
         numevents = aeApiPoll(eventLoop, tvp);
         for (j = 0; j < numevents; j++) {
             aeFileEvent *fe = &eventLoop->events[eventLoop->fired[j].fd];
@@ -417,6 +452,7 @@ int aeProcessEvents(aeEventLoop *eventLoop, int flags)
             }
             processed++;
         }
+        pthread_mutex_unlock(&eventLoop->mutexTimeEvents);
     }
     /* Check time events */
     if (flags & AE_TIME_EVENTS)
