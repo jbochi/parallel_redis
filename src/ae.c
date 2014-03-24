@@ -390,6 +390,8 @@ int aeProcessEvents(aeEventLoop *eventLoop, int flags)
     /* Nothing to do? return ASAP */
     if (!(flags & AE_TIME_EVENTS) && !(flags & AE_FILE_EVENTS)) return 0;
 
+    pthread_mutex_lock(&eventLoop->mutexFileEvents);
+
     /* Note that we want call select() even if there are no
      * file events to process as long as we want to process time
      * events, in order to sleep until the next time event is ready
@@ -431,7 +433,6 @@ int aeProcessEvents(aeEventLoop *eventLoop, int flags)
             }
         }
 
-        pthread_mutex_lock(&eventLoop->mutexFileEvents);
         numevents = aeApiPoll(eventLoop, tvp);
         for (j = 0; j < numevents; j++) {
             aeFileEvent *fe = &eventLoop->events[eventLoop->fired[j].fd];
@@ -452,8 +453,9 @@ int aeProcessEvents(aeEventLoop *eventLoop, int flags)
             }
             processed++;
         }
-        pthread_mutex_unlock(&eventLoop->mutexFileEvents);
     }
+    pthread_mutex_unlock(&eventLoop->mutexFileEvents);
+
     /* Check time events */
     if (flags & AE_TIME_EVENTS)
         processed += processTimeEvents(eventLoop);
