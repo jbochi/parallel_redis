@@ -876,10 +876,10 @@ void resumeLuaThread(aeEventLoop *el, int fd, void *clientData, int mask) {
         server.script_reply = luaRedisCommandReply();
     }
 
+    aeDeleteFileEvent(el, fd, mask);
     pthread_cond_signal(&server.lua_cv);
     pthread_mutex_unlock(&server.lua_mutex);
 
-    aeDeleteFileEvent(el, fd, mask);
     // luaCallAndReplyInBackGround(c);
 }
 
