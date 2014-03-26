@@ -700,6 +700,8 @@ void scriptingInit(void) {
     scriptingEnableGlobalsProtection(lua);
 
     server.lua = lua;
+    pthread_mutex_init(&server.lua_mutex, NULL);
+    pthread_cond_init (&server.lua_cv, NULL);
 }
 
 /* Release resources related to Lua scripting.
@@ -865,16 +867,20 @@ void luaCallAndReplyInBackGround(redisClient *c);
 
 
 void resumeLuaThread(aeEventLoop *el, int fd, void *clientData, int mask) {
-    redisClient *c = (redisClient*) clientData;
+    // redisClient *c = (redisClient*) clientData;
 
     redisLog(REDIS_WARNING, "Time event called");
+    pthread_mutex_lock(&server.lua_mutex);
     if (server.script_cmd) {
         redisLog(REDIS_WARNING, "Main thread executing redis command");
         server.script_reply = luaRedisCommandReply();
     }
 
+    pthread_cond_signal(&server.lua_cv);
+    pthread_mutex_unlock(&server.lua_mutex);
+
     aeDeleteFileEvent(el, fd, mask);
-    luaCallAndReplyInBackGround(c);
+    // luaCallAndReplyInBackGround(c);
 }
 
 void luaCallAndReply(redisClient *c) {
@@ -909,12 +915,20 @@ void luaCallAndReply(redisClient *c) {
     selectDb(c,server.lua_client->db->id); /* set DB ID from Lua client */
     lua_gc(lua,LUA_GCSTEP,1);
 
-    if (status == LUA_YIELD) {
+    pthread_mutex_lock(&server.lua_mutex);
+    while (status == LUA_YIELD) {
         // If the Lua script yields, we create a time event to run any
         // pending Redis command inside the event loop
         redisLog(REDIS_WARNING,"creating time event");
         aeCreateFileEvent(server.el,c->fd,AE_WRITABLE,resumeLuaThread,c);
-    } else if (status != LUA_OK) {
+
+        pthread_cond_wait(&server.lua_cv, &server.lua_mutex);
+        redisLog(REDIS_WARNING,"resuming");
+        status = lua_resume(lua,NULL,0);
+    }
+    pthread_mutex_unlock(&server.lua_mutex);
+
+    if (status != LUA_OK) {
         // TODO: Use the error handler to get a better error message
         addReplyErrorFormat(c,"Error running script: %s\n",  //  (call to %s)
             /*funcname,*/ lua_tostring(lua,-1));

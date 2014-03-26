@@ -838,6 +838,9 @@ struct redisServer {
                              execution. */
     int lua_kill;         /* Kill the script if true. */
 
+    pthread_mutex_t lua_mutex;
+    pthread_cond_t lua_cv;
+
     struct redisCommand *script_cmd, *script_lastcmd;
     sds script_reply;
 
