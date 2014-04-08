@@ -919,7 +919,9 @@ void luaCallAndReply(redisClient *c, int evalasync) {
     lua_gc(lua,LUA_GCSTEP,1);
 
     if (status != LUA_OK) {
-        // TODO: Use the error handler to get a better error message
+        lua_getglobal(lua,"__redis__err__handler");
+        lua_insert(lua, -2);
+        lua_call(lua,1,1);
         addReplyErrorFormat(c,"Error running script: %s\n",  //  (call to %s)
             /*funcname,*/ lua_tostring(lua,-1));
         lua_pop(lua, 1); /* Consume the Lua error string. */
