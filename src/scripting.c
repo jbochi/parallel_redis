@@ -892,6 +892,19 @@ void luaCallAndReply(redisClient *c, int evalasync) {
 
     status = lua_resume(lua,NULL,0);
 
+    while (status == LUA_YIELD) {
+        if (evalasync) {
+            /* If the Lua script yields, we create a time event to run any
+             * pending Redis command inside the event loop before we
+             * resume the script. */
+            pthread_mutex_lock(&server.lua_mutex);
+            aeCreateFileEvent(server.el,c->fd,AE_WRITABLE,resumeLuaThread,c);
+            pthread_cond_wait(&server.lua_cv, &server.lua_mutex);
+            pthread_mutex_unlock(&server.lua_mutex);
+        }
+        status = lua_resume(lua,NULL,0);
+    }
+
     /* Perform some cleanup that we need to do both on error and success. */
     if (delhook) lua_sethook(lua,luaMaskCountHook,0,0); /* Disable hook */
     if (server.lua_timedout) {
@@ -904,19 +917,6 @@ void luaCallAndReply(redisClient *c, int evalasync) {
     server.lua_caller = NULL;
     selectDb(c,server.lua_client->db->id); /* set DB ID from Lua client */
     lua_gc(lua,LUA_GCSTEP,1);
-
-    pthread_mutex_lock(&server.lua_mutex);
-    while (status == LUA_YIELD) {
-        if (evalasync) {
-            /* If the Lua script yields, we create a time event to run any
-             * pending Redis command inside the event loop before we
-             * resume the script. */
-            aeCreateFileEvent(server.el,c->fd,AE_WRITABLE,resumeLuaThread,c);
-            pthread_cond_wait(&server.lua_cv, &server.lua_mutex);
-        }
-        status = lua_resume(lua,NULL,0);
-    }
-    pthread_mutex_unlock(&server.lua_mutex);
 
     if (status != LUA_OK) {
         // TODO: Use the error handler to get a better error message
