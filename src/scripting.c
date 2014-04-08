@@ -965,7 +965,7 @@ void luaCallAndReplyInBackGround(redisClient *c) {
 }
 
 
-void evalGenericCommand(redisClient *c, int evalsha) {
+void evalGenericCommand(redisClient *c, int evalsha, int evalasync) {
     lua_State *lua = server.lua;
     lua_State *lua_thread;
 
@@ -1046,7 +1046,11 @@ void evalGenericCommand(redisClient *c, int evalsha) {
     /* Select the right DB in the context of the Lua client */
     selectDb(server.lua_client,c->db->id);
 
-    luaCallAndReplyInBackGround(c);
+    if (evalasync) {
+        luaCallAndReplyInBackGround(c);
+    } else {
+        luaCallAndReply(c);
+    }
 
     /* EVALSHA should be propagated to Slave and AOF file as full EVAL, unless
      * we are sure that the script was already in the context of all the
@@ -1076,10 +1080,14 @@ void evalGenericCommand(redisClient *c, int evalsha) {
 }
 
 void evalCommand(redisClient *c) {
-    evalGenericCommand(c,0);
+    evalGenericCommand(c,0,0);
 }
 
-void evalShaCommand(redisClient *c) {
+void evalAsyncCommand(redisClient *c) {
+    evalGenericCommand(c,0,1);
+}
+
+void evalShaGenericCommand(redisClient *c, int evalasync) {
     if (sdslen(c->argv[1]->ptr) != 40) {
         /* We know that a match is not possible if the provided SHA is
          * not the right length. So we return an error ASAP, this way
@@ -1088,7 +1096,15 @@ void evalShaCommand(redisClient *c) {
         addReply(c, shared.noscripterr);
         return;
     }
-    evalGenericCommand(c,1);
+    evalGenericCommand(c,1,evalasync);
+}
+
+void evalShaCommand(redisClient *c) {
+    evalShaGenericCommand(c,0);
+}
+
+void evalShaAsyncCommand(redisClient *c) {
+    evalShaGenericCommand(c,1);
 }
 
 /* We replace math.random() with our implementation that is not affected
