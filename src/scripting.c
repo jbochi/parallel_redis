@@ -933,25 +933,16 @@ void luaCallAndReply(redisClient *c, int evalasync) {
     //TODO: Clean the lua thread. A reference to it is on the global state.
 }
 
-struct thread_data {
-    redisClient *c;
-};
-
 static void *luaCallAndReplyAsyncThreadHandler(void * threadarg) {
-    struct thread_data *my_data;
-    my_data = (struct thread_data *) threadarg;
-    luaCallAndReply(my_data->c, 1);
+    redisClient *c = (redisClient *) threadarg;
+    luaCallAndReply(c, 1);
     pthread_exit(NULL);
 }
 
 void luaCallAndReplyAsync(redisClient *c) {
     pthread_t thread;
-    int rc;
-    struct thread_data *data = zmalloc(sizeof(struct thread_data));
-    data->c = c;
-    rc = pthread_create(&thread, NULL, luaCallAndReplyAsyncThreadHandler, (void *) data);
+    pthread_create(&thread, NULL, luaCallAndReplyAsyncThreadHandler, (void *) c);
 }
-
 
 void evalGenericCommand(redisClient *c, int evalsha, int evalasync) {
     lua_State *lua = server.lua;
