@@ -363,7 +363,6 @@ int luaRedisGenericCommand(lua_State *lua, int raise_error) {
 
     // Yield, and let the command be executed when thread is resumed
     server.script_cmd = cmd;
-    redisLog(REDIS_WARNING, "Redis command called. Yielding");
     if (raise_error) {
         return lua_yieldk(lua,0,0,luaRedisCallCommandCont);
     } else {
@@ -863,27 +862,20 @@ int luaCreateFunction(redisClient *c, lua_State *lua, char *funcname, robj *body
 }
 
 // TODO: proper forward declaration
-void luaCallAndReplyInBackGround(redisClient *c);
+void luaCallAndReplyAsync(redisClient *c);
 
 
 void resumeLuaThread(aeEventLoop *el, int fd, void *clientData, int mask) {
-    // redisClient *c = (redisClient*) clientData;
-
-    redisLog(REDIS_WARNING, "Time event called");
     pthread_mutex_lock(&server.lua_mutex);
     if (server.script_cmd) {
-        redisLog(REDIS_WARNING, "Main thread executing redis command");
         server.script_reply = luaRedisCommandReply();
     }
-
     aeDeleteFileEvent(el, fd, mask);
     pthread_cond_signal(&server.lua_cv);
     pthread_mutex_unlock(&server.lua_mutex);
-
-    // luaCallAndReplyInBackGround(c);
 }
 
-void luaCallAndReply(redisClient *c) {
+void luaCallAndReply(redisClient *c, int evalasync) {
     lua_State *lua = server.lua_thread;
     int delhook = 0, status;
 
@@ -917,13 +909,13 @@ void luaCallAndReply(redisClient *c) {
 
     pthread_mutex_lock(&server.lua_mutex);
     while (status == LUA_YIELD) {
-        // If the Lua script yields, we create a time event to run any
-        // pending Redis command inside the event loop
-        redisLog(REDIS_WARNING,"creating time event");
-        aeCreateFileEvent(server.el,c->fd,AE_WRITABLE,resumeLuaThread,c);
-
-        pthread_cond_wait(&server.lua_cv, &server.lua_mutex);
-        redisLog(REDIS_WARNING,"resuming");
+        if (evalasync) {
+            /* If the Lua script yields, we create a time event to run any
+             * pending Redis command inside the event loop before we
+             * resume the script. */
+            aeCreateFileEvent(server.el,c->fd,AE_WRITABLE,resumeLuaThread,c);
+            pthread_cond_wait(&server.lua_cv, &server.lua_mutex);
+        }
         status = lua_resume(lua,NULL,0);
     }
     pthread_mutex_unlock(&server.lua_mutex);
@@ -945,23 +937,19 @@ struct thread_data {
     redisClient *c;
 };
 
-static void *luaCallAndReplyThreadHandler(void * threadarg) {
+static void *luaCallAndReplyAsyncThreadHandler(void * threadarg) {
     struct thread_data *my_data;
     my_data = (struct thread_data *) threadarg;
-    luaCallAndReply(my_data->c);
-    redisLog(REDIS_WARNING,"thread ended");
+    luaCallAndReply(my_data->c, 1);
     pthread_exit(NULL);
 }
 
-void luaCallAndReplyInBackGround(redisClient *c) {
+void luaCallAndReplyAsync(redisClient *c) {
     pthread_t thread;
     int rc;
     struct thread_data *data = zmalloc(sizeof(struct thread_data));
     data->c = c;
-    rc = pthread_create(&thread, NULL, luaCallAndReplyThreadHandler, (void *) data);
-    redisLog(REDIS_WARNING,"thread started");
-    // pthread_join(thread, &status);
-    // redisLog(REDIS_WARNING,"thread joined");
+    rc = pthread_create(&thread, NULL, luaCallAndReplyAsyncThreadHandler, (void *) data);
 }
 
 
@@ -991,7 +979,6 @@ void evalGenericCommand(redisClient *c, int evalsha, int evalasync) {
     if (getLongLongFromObjectOrReply(c,c->argv[2],&numkeys,NULL) != REDIS_OK)
         return;
     if (numkeys > (c->argc - 3)) {
-        redisLog(REDIS_WARNING,"num keys %lld, num args %d", numkeys, c->argc - 3);
         addReplyError(c,"Number of keys can't be greater than number of args");
         return;
     }
@@ -1047,9 +1034,9 @@ void evalGenericCommand(redisClient *c, int evalsha, int evalasync) {
     selectDb(server.lua_client,c->db->id);
 
     if (evalasync) {
-        luaCallAndReplyInBackGround(c);
+        luaCallAndReplyAsync(c);
     } else {
-        luaCallAndReply(c);
+        luaCallAndReply(c, 0);
     }
 
     /* EVALSHA should be propagated to Slave and AOF file as full EVAL, unless
