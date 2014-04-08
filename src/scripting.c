@@ -861,10 +861,8 @@ int luaCreateFunction(redisClient *c, lua_State *lua, char *funcname, robj *body
     return REDIS_OK;
 }
 
-// TODO: proper forward declaration
-void luaCallAndReplyAsync(redisClient *c);
-
-
+/* A file event callback that executes any needed lua commands inside the
+ * event loop before signaling a Lua thread that it can be resumed */
 void resumeLuaThread(aeEventLoop *el, int fd, void *clientData, int mask) {
     pthread_mutex_lock(&server.lua_mutex);
     if (server.script_cmd) {
@@ -875,6 +873,7 @@ void resumeLuaThread(aeEventLoop *el, int fd, void *clientData, int mask) {
     pthread_mutex_unlock(&server.lua_mutex);
 }
 
+/* Resumes a lua thread and runs it until completion, sending the reply to client. */
 void luaCallAndReply(redisClient *c, int evalasync) {
     lua_State *lua = server.lua_thread;
     int delhook = 0, status;
@@ -891,7 +890,6 @@ void luaCallAndReply(redisClient *c, int evalasync) {
         delhook = 1;
     }
 
-    /* Assume in the stack there is a thread waiting to be resumed. */
     status = lua_resume(lua,NULL,0);
 
     /* Perform some cleanup that we need to do both on error and success. */
@@ -933,6 +931,7 @@ void luaCallAndReply(redisClient *c, int evalasync) {
     //TODO: Clean the lua thread. A reference to it is on the global state.
 }
 
+/* Functions to create a new thread to run async scripts */
 static void *luaCallAndReplyAsyncThreadHandler(void * threadarg) {
     redisClient *c = (redisClient *) threadarg;
     luaCallAndReply(c, 1);
@@ -990,7 +989,6 @@ void evalGenericCommand(redisClient *c, int evalsha, int evalasync) {
             funcname[j+2] = tolower(sha[j]);
         funcname[42] = '\0';
     }
-
 
     /* Try to lookup the Lua function */
     lua_getglobal(lua, funcname);
