@@ -252,6 +252,14 @@ int luaRedisGenericCommandCont(lua_State *lua, int raise_error) {
     }
     sdsfree(reply);
     server.script_reply = NULL;
+    if (raise_error) {
+        /* If we are here we should have an error in the stack, in the
+         * form of a table with an "err" field. Extract the string to
+         * return the plain error. */
+        lua_pushstring(lua,"err");
+        lua_gettable(lua,-2);
+        return lua_error(lua);
+    }
     return 1;
 }
 
