@@ -43,8 +43,17 @@ start_server {tags {"scripting"}} {
         r eval {return redis.call('get','mykey')} 0
     } {myval}
 
+    test {EVALASYNC - is Lua able to call Redis API asynchronously?} {
+        r set mykey myval
+        r evalasync {return redis.call('get','mykey')} 0
+    } {myval}
+
     test {EVALSHA - Can we call a SHA1 if already defined?} {
         r evalsha 9bd632c7d33e571e9f24556ebed26c3479a87129 0
+    } {myval}
+
+    test {EVALSHA - Can we call a SHA1 if already defined asynchronously?} {
+        r evalshaasync 9bd632c7d33e571e9f24556ebed26c3479a87129 0
     } {myval}
 
     test {EVALSHA - Can we call a SHA1 in uppercase?} {
