@@ -938,7 +938,9 @@ void luaCallAndReply(redisClient *c, int evalasync) {
          * send it to * the client. */
         luaReplyToRedisReply(c,lua); /* Convert and consume the reply. */
     }
-    //TODO: Clean the lua thread. A reference to it is on the global state.
+    //Clean the lua thread
+    lua_settop(server.lua, 0);
+    lua_gc(server.lua,LUA_GCSTEP,1);
 }
 
 /* Functions to create a new thread to run async scripts */
