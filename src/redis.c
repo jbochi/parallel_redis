@@ -2198,20 +2198,20 @@ int processCommand(redisClient *c) {
     }
 
     /* Lua script too slow? Only allow a limited number of commands. */
-    // if (server.lua_timedout &&
-    //       c->cmd->proc != authCommand &&
-    //       c->cmd->proc != replconfCommand &&
-    //     !(c->cmd->proc == shutdownCommand &&
-    //       c->argc == 2 &&
-    //       tolower(((char*)c->argv[1]->ptr)[0]) == 'n') &&
-    //     !(c->cmd->proc == scriptCommand &&
-    //       c->argc == 2 &&
-    //       tolower(((char*)c->argv[1]->ptr)[0]) == 'k'))
-    // {
-    //     flagTransaction(c);
-    //     addReply(c, shared.slowscripterr);
-    //     return REDIS_OK;
-    // }
+    if (server.lua_timedout &&
+          c->cmd->proc != authCommand &&
+          c->cmd->proc != replconfCommand &&
+        !(c->cmd->proc == shutdownCommand &&
+          c->argc == 2 &&
+          tolower(((char*)c->argv[1]->ptr)[0]) == 'n') &&
+        !(c->cmd->proc == scriptCommand &&
+          c->argc == 2 &&
+          tolower(((char*)c->argv[1]->ptr)[0]) == 'k'))
+    {
+        flagTransaction(c);
+        addReply(c, shared.slowscripterr);
+        return REDIS_OK;
+    }
 
     /* Exec the command */
     if (c->flags & REDIS_MULTI &&
