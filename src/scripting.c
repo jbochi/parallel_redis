@@ -201,7 +201,7 @@ void luaSortArray(lua_State *lua) {
     lua_pop(lua,1);             /* Stack: array (sorted) */
 }
 
-sds luaRedisCommandReply() {
+sds luaRedisExecCommand() {
     int j;
     redisClient *c = server.lua_client;
     sds reply;
@@ -228,7 +228,7 @@ sds luaRedisCommandReply() {
     }
 
     c->reply_bytes = 0;
-    // Clean up argc and v
+    /* Clean up argc and v */
     for (j = 0; j < c->argc; j++)
         decrRefCount(c->argv[j]);
     zfree(c->argv);
@@ -237,9 +237,13 @@ sds luaRedisCommandReply() {
 }
 
 int luaRedisGenericCommandCont(lua_State *lua, int raise_error) {
-    sds reply = server.script_reply;
+    sds reply = server.script_cmd_reply;
+    /* If we are resuming an async command, the command will already been
+       executed by now and the reply saved. Otherwise, this is a blocking
+       command running inside the event loop and it is safe to call the
+       command now. */
     if (reply == NULL) {
-        reply = luaRedisCommandReply();
+        reply = luaRedisExecCommand();
     }
     if (raise_error && reply[0] != '-') raise_error = 0;
     redisProtocolToLuaType(lua,reply);
@@ -251,7 +255,7 @@ int luaRedisGenericCommandCont(lua_State *lua, int raise_error) {
             luaSortArray(lua);
     }
     sdsfree(reply);
-    server.script_reply = NULL;
+    server.script_cmd_reply = NULL;
     if (raise_error) {
         /* If we are here we should have an error in the stack, in the
          * form of a table with an "err" field. Extract the string to
@@ -874,7 +878,7 @@ int luaCreateFunction(redisClient *c, lua_State *lua, char *funcname, robj *body
 void resumeLuaThread(aeEventLoop *el, int fd, void *clientData, int mask) {
     pthread_mutex_lock(&server.lua_yield_mutex);
     if (server.script_cmd) {
-        server.script_reply = luaRedisCommandReply();
+        server.script_cmd_reply = luaRedisExecCommand();
     }
     aeDeleteFileEvent(el, fd, mask);
     pthread_cond_signal(&server.lua_yield_cv);

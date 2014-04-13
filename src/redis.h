@@ -844,9 +844,9 @@ struct redisServer {
     pthread_cond_t lua_yield_cv; /* The condition variable that signals that the
                                     command has been executed and that the thread
                                     can be resumed. */
-
-    struct redisCommand *script_cmd, *script_lastcmd;
-    sds script_reply;
+    struct redisCommand *script_cmd; /* The next command that should be run */
+    struct redisCommand *script_lastcmd; /* The last command executed */
+    sds script_cmd_reply; /* The last command result */
 
     /* Assert & bug reporting */
     char *assert_failed;
