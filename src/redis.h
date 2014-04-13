@@ -824,7 +824,6 @@ struct redisServer {
     int cluster_migration_barrier; /* Cluster replicas migration barrier. */
     /* Scripting */
     lua_State *lua; /* The Lua interpreter. We use just one for all clients */
-    lua_State *lua_thread;
     redisClient *lua_client;   /* The "fake client" to query Redis from Lua */
     redisClient *lua_caller;   /* The client running EVAL right now, or NULL */
     dict *lua_scripts;         /* A dictionary of SHA1 -> Lua scripts */
@@ -838,8 +837,13 @@ struct redisServer {
                              execution. */
     int lua_kill;         /* Kill the script if true. */
 
-    pthread_mutex_t lua_mutex;
-    pthread_cond_t lua_cv;
+    /* Async scripting */
+    lua_State *lua_thread; /* The lua thread where async scripts are run */
+    pthread_mutex_t lua_yield_mutex; /* The mutex to allow async scripts to yield
+                                        and run commands inside the event loop. */
+    pthread_cond_t lua_yield_cv; /* The condition variable that signals that the
+                                    command has been executed and that the thread
+                                    can be resumed. */
 
     struct redisCommand *script_cmd, *script_lastcmd;
     sds script_reply;

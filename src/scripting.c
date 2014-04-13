@@ -707,8 +707,8 @@ void scriptingInit(void) {
     scriptingEnableGlobalsProtection(lua);
 
     server.lua = lua;
-    pthread_mutex_init(&server.lua_mutex, NULL);
-    pthread_cond_init (&server.lua_cv, NULL);
+    pthread_mutex_init(&server.lua_yield_mutex, NULL);
+    pthread_cond_init (&server.lua_yield_cv, NULL);
 }
 
 /* Release resources related to Lua scripting.
@@ -872,13 +872,13 @@ int luaCreateFunction(redisClient *c, lua_State *lua, char *funcname, robj *body
 /* A file event callback that executes any needed lua commands inside the
  * event loop before signaling a Lua thread that it can be resumed */
 void resumeLuaThread(aeEventLoop *el, int fd, void *clientData, int mask) {
-    pthread_mutex_lock(&server.lua_mutex);
+    pthread_mutex_lock(&server.lua_yield_mutex);
     if (server.script_cmd) {
         server.script_reply = luaRedisCommandReply();
     }
     aeDeleteFileEvent(el, fd, mask);
-    pthread_cond_signal(&server.lua_cv);
-    pthread_mutex_unlock(&server.lua_mutex);
+    pthread_cond_signal(&server.lua_yield_cv);
+    pthread_mutex_unlock(&server.lua_yield_mutex);
 }
 
 /* Resumes a lua thread and runs it until completion, sending the reply to client. */
@@ -905,10 +905,10 @@ void luaCallAndReply(redisClient *c, int evalasync) {
             /* If the Lua script yields, we create a time event to run any
              * pending Redis command inside the event loop before we
              * resume the script. */
-            pthread_mutex_lock(&server.lua_mutex);
+            pthread_mutex_lock(&server.lua_yield_mutex);
             aeCreateFileEvent(server.el,c->fd,AE_WRITABLE,resumeLuaThread,c);
-            pthread_cond_wait(&server.lua_cv, &server.lua_mutex);
-            pthread_mutex_unlock(&server.lua_mutex);
+            pthread_cond_wait(&server.lua_yield_cv, &server.lua_yield_mutex);
+            pthread_mutex_unlock(&server.lua_yield_mutex);
         }
         status = lua_resume(lua,NULL,0);
     }
