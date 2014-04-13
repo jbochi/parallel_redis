@@ -373,7 +373,8 @@ int luaRedisGenericCommand(lua_State *lua, int raise_error) {
     if (cmd->flags & REDIS_CMD_RANDOM) server.lua_random_dirty = 1;
     if (cmd->flags & REDIS_CMD_WRITE) server.lua_write_dirty = 1;
 
-    // Yield, and let the command be executed when thread is resumed
+    /* Yield, allowing the lua thread to suspend if this is a async
+       script until the command is executed inside the event loop. */
     server.script_cmd = cmd;
     if (raise_error) {
         return lua_yieldk(lua,0,0,luaRedisCallCommandCont);
@@ -712,7 +713,7 @@ void scriptingInit(void) {
 
     server.lua = lua;
     pthread_mutex_init(&server.lua_yield_mutex, NULL);
-    pthread_cond_init (&server.lua_yield_cv, NULL);
+    pthread_cond_init(&server.lua_yield_cv, NULL);
 }
 
 /* Release resources related to Lua scripting.
@@ -755,7 +756,6 @@ void luaReplyToRedisReply(redisClient *c, lua_State *lua) {
 
     switch(t) {
     case LUA_TSTRING:
-        //addReplyBulkCBuffer(c,(char*)lua_tostring(lua,-1),lua_rawlen(lua,-1));
         {
             sds luastr = sdsnewlen((char*)lua_tostring(lua,-1),lua_rawlen(lua,-1));
             sdsmapchars(luastr,"\r\n","  ",2);
@@ -873,9 +873,9 @@ int luaCreateFunction(redisClient *c, lua_State *lua, char *funcname, robj *body
     return REDIS_OK;
 }
 
-/* A file event callback that executes any needed lua commands inside the
- * event loop before signaling a Lua thread that it can be resumed */
-void resumeLuaThread(aeEventLoop *el, int fd, void *clientData, int mask) {
+/* A file event callback that executes the pending lua command inside the
+ * event loop before signaling the Lua thread that it can resume */
+void luaExecAndResumeThread(aeEventLoop *el, int fd, void *clientData, int mask) {
     pthread_mutex_lock(&server.lua_yield_mutex);
     if (server.script_cmd) {
         server.script_cmd_reply = luaRedisExecCommand();
@@ -910,7 +910,7 @@ void luaCallAndReply(redisClient *c, int evalasync) {
              * pending Redis command inside the event loop before we
              * resume the script. */
             pthread_mutex_lock(&server.lua_yield_mutex);
-            aeCreateFileEvent(server.el,c->fd,AE_WRITABLE,resumeLuaThread,c);
+            aeCreateFileEvent(server.el,c->fd,AE_WRITABLE,luaExecAndResumeThread,c);
             pthread_cond_wait(&server.lua_yield_cv, &server.lua_yield_mutex);
             pthread_mutex_unlock(&server.lua_yield_mutex);
         }
@@ -934,20 +934,20 @@ void luaCallAndReply(redisClient *c, int evalasync) {
         lua_getglobal(lua,"__redis__err__handler");
         lua_insert(lua, -2);
         lua_call(lua,1,1);
-        addReplyErrorFormat(c,"Error running script: %s\n",  //  (call to %s)
-            /*funcname,*/ lua_tostring(lua,-1));
+        addReplyErrorFormat(c,"Error running script: %s\n",
+                            /*TODO: funcname,  (call to %s) */
+                            lua_tostring(lua,-1));
         lua_pop(lua, 1); /* Consume the Lua error string. */
     } else {
         /* On success convert the Lua return value into Redis protocol, and
          * send it to * the client. */
         luaReplyToRedisReply(c,lua); /* Convert and consume the reply. */
     }
-    //Clean the lua thread
+    /* Clean the lua thread */
     lua_settop(server.lua, 0);
     lua_gc(server.lua,LUA_GCSTEP,1);
 }
 
-/* Functions to create a new thread to run async scripts */
 static void *luaCallAndReplyAsyncThreadHandler(void * threadarg) {
     redisClient *c = (redisClient *) threadarg;
     luaCallAndReply(c, 1);
@@ -956,7 +956,7 @@ static void *luaCallAndReplyAsyncThreadHandler(void * threadarg) {
 
 void luaCallAndReplyAsync(redisClient *c) {
     pthread_t thread;
-    pthread_create(&thread, NULL, luaCallAndReplyAsyncThreadHandler, (void *) c);
+    pthread_create(&thread,NULL,luaCallAndReplyAsyncThreadHandler,(void *) c);
 }
 
 void evalGenericCommand(redisClient *c, int evalsha, int evalasync) {
