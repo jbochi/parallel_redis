@@ -201,14 +201,22 @@ void luaSortArray(lua_State *lua) {
     lua_pop(lua,1);             /* Stack: array (sorted) */
 }
 
-sds luaRedisExecCommand() {
+sds luaRedisExecCommand(int async) {
     int j;
+    int propagateFlag = 0;
     redisClient *c = server.lua_client;
     sds reply;
 
+    /* If this is an async execution, every command is propagated, instead
+       of propagating the EVAL command, since commands are not executed
+       atomically */
+    if (async) {
+        propagateFlag = REDIS_CALL_PROPAGATE;
+    }
+
     /* Run the command */
     c->cmd = server.script_cmd;
-    call(c,REDIS_CALL_SLOWLOG | REDIS_CALL_STATS);
+    call(c,REDIS_CALL_SLOWLOG | REDIS_CALL_STATS | propagateFlag);
     server.script_lastcmd = server.script_cmd;
     server.script_cmd = NULL;
 
@@ -243,7 +251,7 @@ int luaRedisGenericCommandCont(lua_State *lua, int raise_error) {
        command running inside the event loop and it is safe to call the
        command now. */
     if (reply == NULL) {
-        reply = luaRedisExecCommand();
+        reply = luaRedisExecCommand(0);
     }
     if (raise_error && reply[0] != '-') raise_error = 0;
     redisProtocolToLuaType(lua,reply);
@@ -878,7 +886,9 @@ int luaCreateFunction(redisClient *c, lua_State *lua, char *funcname, robj *body
 void luaExecAndResumeThread(aeEventLoop *el, int fd, void *clientData, int mask) {
     pthread_mutex_lock(&server.lua_yield_mutex);
     if (server.script_cmd) {
-        server.script_cmd_reply = luaRedisExecCommand();
+        if (server.script_cmd->flags & REDIS_CMD_WRITE) {
+            server.script_cmd_reply = luaRedisExecCommand(1);
+        }
     }
     aeDeleteFileEvent(el, fd, mask);
     pthread_cond_signal(&server.lua_yield_cv);
