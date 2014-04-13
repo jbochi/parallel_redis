@@ -39,6 +39,7 @@
 #include <string.h>
 #include <time.h>
 #include <errno.h>
+#include <pthread.h>
 
 #include "ae.h"
 #include "zmalloc.h"

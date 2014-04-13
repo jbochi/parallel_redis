@@ -39,6 +39,7 @@
 #include <sys/time.h>
 #include <signal.h>
 #include <assert.h>
+#include <pthread.h>
 
 #include "ae.h"
 #include "hiredis.h"
