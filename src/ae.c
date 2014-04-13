@@ -83,7 +83,6 @@ aeEventLoop *aeCreateEventLoop(int setsize) {
 
     pthread_mutexattr_settype(&eventLoop->mutexAttr, PTHREAD_MUTEX_RECURSIVE);
     pthread_mutex_init(&eventLoop->mutexFileEvents, &eventLoop->mutexAttr);
-    pthread_mutex_init(&eventLoop->mutexTimeEvents, &eventLoop->mutexAttr);
 
     return eventLoop;
 
@@ -134,7 +133,6 @@ int aeResizeSetSize(aeEventLoop *eventLoop, int setsize) {
 
 void aeDeleteEventLoop(aeEventLoop *eventLoop) {
     pthread_mutex_destroy(&eventLoop->mutexFileEvents);
-    pthread_mutex_destroy(&eventLoop->mutexTimeEvents);
     aeApiFree(eventLoop);
     zfree(eventLoop->events);
     zfree(eventLoop->fired);
@@ -233,8 +231,6 @@ long long aeCreateTimeEvent(aeEventLoop *eventLoop, long long milliseconds,
         aeTimeProc *proc, void *clientData,
         aeEventFinalizerProc *finalizerProc)
 {
-    pthread_mutex_lock(&eventLoop->mutexTimeEvents);
-
     long long id = eventLoop->timeEventNextId++;
     aeTimeEvent *te;
 
@@ -248,16 +244,12 @@ long long aeCreateTimeEvent(aeEventLoop *eventLoop, long long milliseconds,
     te->next = eventLoop->timeEventHead;
     eventLoop->timeEventHead = te;
 
-    pthread_mutex_unlock(&eventLoop->mutexTimeEvents);
-
     return id;
 }
 
 int aeDeleteTimeEvent(aeEventLoop *eventLoop, long long id)
 {
     aeTimeEvent *te, *prev = NULL;
-
-    pthread_mutex_lock(&eventLoop->mutexTimeEvents);
 
     te = eventLoop->timeEventHead;
     while(te) {
@@ -274,8 +266,6 @@ int aeDeleteTimeEvent(aeEventLoop *eventLoop, long long id)
         prev = te;
         te = te->next;
     }
-
-    pthread_mutex_unlock(&eventLoop->mutexTimeEvents);
 
     return AE_ERR; /* NO event with the specified ID found */
 }
@@ -296,8 +286,6 @@ static aeTimeEvent *aeSearchNearestTimer(aeEventLoop *eventLoop)
     aeTimeEvent *te = eventLoop->timeEventHead;
     aeTimeEvent *nearest = NULL;
 
-    pthread_mutex_lock(&eventLoop->mutexTimeEvents);
-
     while(te) {
         if (!nearest || te->when_sec < nearest->when_sec ||
                 (te->when_sec == nearest->when_sec &&
@@ -305,8 +293,6 @@ static aeTimeEvent *aeSearchNearestTimer(aeEventLoop *eventLoop)
             nearest = te;
         te = te->next;
     }
-
-    pthread_mutex_unlock(&eventLoop->mutexTimeEvents);
 
     return nearest;
 }
@@ -317,8 +303,6 @@ static int processTimeEvents(aeEventLoop *eventLoop) {
     aeTimeEvent *te;
     long long maxId;
     time_t now = time(NULL);
-
-    pthread_mutex_lock(&eventLoop->mutexTimeEvents);
 
     /* If the system clock is moved to the future, and then set back to the
      * right value, time events may be delayed in a random way. Often this
@@ -379,8 +363,6 @@ static int processTimeEvents(aeEventLoop *eventLoop) {
             te = te->next;
         }
     }
-
-    pthread_mutex_unlock(&eventLoop->mutexTimeEvents);
 
     return processed;
 }
