@@ -82,8 +82,8 @@ aeEventLoop *aeCreateEventLoop(int setsize) {
     for (i = 0; i < setsize; i++)
         eventLoop->events[i].mask = AE_NONE;
 
-    pthread_mutexattr_settype(&eventLoop->mutexAttr, PTHREAD_MUTEX_RECURSIVE);
-    pthread_mutex_init(&eventLoop->mutexFileEvents, &eventLoop->mutexAttr);
+    pthread_mutexattr_settype(&eventLoop->mutexFileEventsAttr, PTHREAD_MUTEX_RECURSIVE);
+    pthread_mutex_init(&eventLoop->mutexFileEvents, &eventLoop->mutexFileEventsAttr);
 
     return eventLoop;
 
