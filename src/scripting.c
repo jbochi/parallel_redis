@@ -206,7 +206,7 @@ sds luaRedisExecCommand(lua_State *lua, int async) {
     int propagateFlag = 0;
 
     lua_getfield(lua, LUA_REGISTRYINDEX, "redis_client");
-    redisClient *client = (redisClient *) lua_touserdata(lua, -1);
+    redisClient *caller = (redisClient *) lua_touserdata(lua, -1);
     redisClient *c = server.lua_client;
     sds reply;
 
@@ -218,10 +218,10 @@ sds luaRedisExecCommand(lua_State *lua, int async) {
     }
 
     /* Run the command */
-    c->cmd = client->script_cmd;
+    c->cmd = caller->script_cmd;
     call(c,REDIS_CALL_SLOWLOG | REDIS_CALL_STATS | propagateFlag);
-    client->script_lastcmd = client->script_cmd;
-    client->script_cmd = NULL;
+    caller->script_lastcmd = caller->script_cmd;
+    caller->script_cmd = NULL;
 
     /* Convert the result of the Redis command into a suitable Lua type.
      * The first thing we need is to create a single string from the client
@@ -249,9 +249,9 @@ sds luaRedisExecCommand(lua_State *lua, int async) {
 
 int luaRedisGenericCommandCont(lua_State *lua, int raise_error) {
     lua_getfield(lua, LUA_REGISTRYINDEX, "redis_client");
-    redisClient *client = (redisClient *) lua_touserdata(lua, -1);
+    redisClient *caller = (redisClient *) lua_touserdata(lua, -1);
 
-    sds reply = client->script_cmd_reply;
+    sds reply = caller->script_cmd_reply;
     /* If we are resuming an async command, the command will already been
        executed by now and the reply saved. Otherwise, this is a blocking
        command running inside the event loop and it is safe to call the
@@ -264,13 +264,13 @@ int luaRedisGenericCommandCont(lua_State *lua, int raise_error) {
 
     /* Sort the output array if needed, assuming it is a non-null multi bulk
      * reply as expected. */
-    if ((client->script_lastcmd->flags & REDIS_CMD_SORT_FOR_SCRIPT) &&
+    if ((caller->script_lastcmd->flags & REDIS_CMD_SORT_FOR_SCRIPT) &&
         (reply[0] == '*' && reply[1] != '-')) {
             luaSortArray(lua);
     }
     sdsfree(reply);
 
-    client->script_cmd_reply = NULL;
+    caller->script_cmd_reply = NULL;
     if (raise_error) {
         /* If we are here we should have an error in the stack, in the
          * form of a table with an "err" field. Extract the string to
@@ -293,7 +293,7 @@ int luaRedisCallCommandCont(lua_State *lua) {
 int luaRedisGenericCommand(lua_State *lua, int raise_error) {
     int j, argc = lua_gettop(lua);
     struct redisCommand *cmd;
-    redisClient *client;
+    redisClient *caller;
 
     robj **argv;
     redisClient *c = server.lua_client;
@@ -391,11 +391,11 @@ int luaRedisGenericCommand(lua_State *lua, int raise_error) {
     if (cmd->flags & REDIS_CMD_WRITE) server.lua_write_dirty = 1;
 
     lua_getfield(lua, LUA_REGISTRYINDEX, "redis_client");
-    client = (redisClient *) lua_touserdata(lua, -1);
+    caller = (redisClient *) lua_touserdata(lua, -1);
 
     /* Yield, allowing the lua thread to suspend if this is a async
        script until the command is executed inside the event loop. */
-    client->script_cmd = cmd;
+    caller->script_cmd = cmd;
     if (raise_error) {
         return lua_yieldk(lua,0,0,luaRedisCallCommandCont);
     } else {
