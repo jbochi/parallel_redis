@@ -1432,7 +1432,7 @@ void initServerConfig() {
     server.cluster_node_timeout = REDIS_CLUSTER_DEFAULT_NODE_TIMEOUT;
     server.cluster_migration_barrier = REDIS_CLUSTER_DEFAULT_MIGRATION_BARRIER;
     server.cluster_configfile = zstrdup(REDIS_DEFAULT_CLUSTER_CONFIG_FILE);
-    server.lua_caller = NULL;
+    server.lua_caller = NULL; // TODO: Should be a list?
     server.lua_time_limit = REDIS_LUA_TIME_LIMIT;
     server.lua_client = NULL;
     server.lua_timedout = 0;

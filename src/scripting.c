@@ -201,12 +201,16 @@ void luaSortArray(lua_State *lua) {
     lua_pop(lua,1);             /* Stack: array (sorted) */
 }
 
+redisClient *luaCaller(lua_State *lua) {
+    lua_getfield(lua, LUA_REGISTRYINDEX, "redis_client");
+    return (redisClient *) lua_touserdata(lua, -1);
+}
+
 sds luaRedisExecCommand(lua_State *lua, int async) {
     int j;
     int propagateFlag = 0;
 
-    lua_getfield(lua, LUA_REGISTRYINDEX, "redis_client");
-    redisClient *caller = (redisClient *) lua_touserdata(lua, -1);
+    redisClient *caller = luaCaller(lua);
     redisClient *c = server.lua_client;
     sds reply;
 
@@ -248,8 +252,7 @@ sds luaRedisExecCommand(lua_State *lua, int async) {
 }
 
 int luaRedisGenericCommandCont(lua_State *lua, int raise_error) {
-    lua_getfield(lua, LUA_REGISTRYINDEX, "redis_client");
-    redisClient *caller = (redisClient *) lua_touserdata(lua, -1);
+    redisClient *caller = luaCaller(lua);
 
     sds reply = caller->script_cmd_reply;
     /* If we are resuming an async command, the command will already been
@@ -390,8 +393,7 @@ int luaRedisGenericCommand(lua_State *lua, int raise_error) {
     if (cmd->flags & REDIS_CMD_RANDOM) server.lua_random_dirty = 1;
     if (cmd->flags & REDIS_CMD_WRITE) server.lua_write_dirty = 1;
 
-    lua_getfield(lua, LUA_REGISTRYINDEX, "redis_client");
-    caller = (redisClient *) lua_touserdata(lua, -1);
+    caller = luaCaller(lua);
 
     /* Yield, allowing the lua thread to suspend if this is a async
        script until the command is executed inside the event loop. */
@@ -524,7 +526,7 @@ void luaMaskCountHook(lua_State *lua, lua_Debug *ar) {
          * we need to mask the client executing the script from the event loop.
          * If we don't do that the client may disconnect and could no longer be
          * here when the EVAL command will return. */
-         aeDeleteFileEvent(server.el, server.lua_caller->fd, AE_READABLE);
+         aeDeleteFileEvent(server.el, luaCaller(lua)->fd, AE_READABLE);
     }
     if (server.lua_timedout)
         aeProcessEvents(server.el, AE_FILE_EVENTS|AE_DONT_WAIT);
@@ -916,9 +918,11 @@ void luaCallAndReply(redisClient *c, int evalasync) {
      * is running for too much time.
      * We set the hook only if the time limit is enabled as the hook will
      * make the Lua script execution slower. */
-    server.lua_caller = c;
+    // TODO: Should not be global
     server.lua_time_start = mstime();
+    server.lua_caller = c;
     server.lua_kill = 0;
+
     if (server.lua_time_limit > 0 && server.masterhost == NULL) {
         lua_sethook(lua,luaMaskCountHook,LUA_MASKCOUNT,100000);
         delhook = 1;
@@ -948,7 +952,10 @@ void luaCallAndReply(redisClient *c, int evalasync) {
         aeCreateFileEvent(server.el,c->fd,AE_READABLE,
                           readQueryFromClient,c);
     }
+
+    // TODO: Should not be global
     server.lua_caller = NULL;
+
     selectDb(c,server.lua_client->db->id); /* set DB ID from Lua client */
     lua_gc(lua,LUA_GCSTEP,1);
 
