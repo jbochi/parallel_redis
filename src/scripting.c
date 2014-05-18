@@ -932,9 +932,12 @@ void luaCallAndReply(redisClient *c, int evalasync) {
     server.lua_time_start = mstime();
     server.lua_kill = 0;
 
-    if (server.lua_time_limit > 0 && server.masterhost == NULL) {
-        lua_sethook(lua,luaMaskCountHook,LUA_MASKCOUNT,100000);
-        delhook = 1;
+    if (!evalasync) {
+        //TODO: handle timeouts in async execution
+        if (server.lua_time_limit > 0 && server.masterhost == NULL) {
+            lua_sethook(lua,luaMaskCountHook,LUA_MASKCOUNT,100000);
+            delhook = 1;
+        }
     }
 
     status = lua_resume(lua,NULL,0);
@@ -954,7 +957,7 @@ void luaCallAndReply(redisClient *c, int evalasync) {
 
     /* Perform some cleanup that we need to do both on error and success. */
     if (delhook) lua_sethook(lua,luaMaskCountHook,0,0); /* Disable hook */
-    if (server.lua_timedout) {
+    if (!evalasync && server.lua_timedout) {
         server.lua_timedout = 0;
         /* Restore the readable handler that was unregistered when the
          * script timeout was detected. */
