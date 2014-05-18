@@ -202,7 +202,9 @@ void luaSortArray(lua_State *lua) {
 }
 
 redisClient *luaCaller(lua_State *lua) {
-    lua_getfield(lua, LUA_REGISTRYINDEX, "redis_client");
+    lua_pushlightuserdata(lua, (void *) lua);
+    lua_gettable(lua, LUA_REGISTRYINDEX);
+
     return (redisClient *) lua_touserdata(lua, -1);
 }
 
@@ -211,7 +213,7 @@ sds luaRedisExecCommand(lua_State *lua, int async) {
     int propagateFlag = 0;
 
     redisClient *caller = luaCaller(lua);
-    redisClient *c = server.lua_client;
+    redisClient *c = caller->lua_client;
     sds reply;
 
     /* If this is an async execution, every command is propagated, instead
@@ -222,10 +224,12 @@ sds luaRedisExecCommand(lua_State *lua, int async) {
     }
 
     /* Run the command */
+    server.lua_caller = caller;
     c->cmd = caller->script_cmd;
     call(c,REDIS_CALL_SLOWLOG | REDIS_CALL_STATS | propagateFlag);
     caller->script_lastcmd = caller->script_cmd;
     caller->script_cmd = NULL;
+    server.lua_caller = NULL;
 
     /* Convert the result of the Redis command into a suitable Lua type.
      * The first thing we need is to create a single string from the client
@@ -296,10 +300,20 @@ int luaRedisCallCommandCont(lua_State *lua) {
 int luaRedisGenericCommand(lua_State *lua, int raise_error) {
     int j, argc = lua_gettop(lua);
     struct redisCommand *cmd;
-    redisClient *caller;
+    redisClient *caller =  luaCaller(lua);
 
     robj **argv;
-    redisClient *c = server.lua_client;
+    redisClient *c = caller->lua_client;
+    if (c == NULL) {
+        /* Create a fake client if this is the first command being executed */
+        c = createClient(-1);
+        c->flags |= REDIS_LUA_CLIENT | REDIS_CLOSE_ASAP;
+
+        /* Select the right DB in the context of the Lua client */
+        selectDb(c,caller->db->id);
+
+        caller->lua_client = c;
+    }
 
     /* Require at least one argument */
     if (argc == 0) {
@@ -392,8 +406,6 @@ int luaRedisGenericCommand(lua_State *lua, int raise_error) {
 
     if (cmd->flags & REDIS_CMD_RANDOM) server.lua_random_dirty = 1;
     if (cmd->flags & REDIS_CMD_WRITE) server.lua_write_dirty = 1;
-
-    caller = luaCaller(lua);
 
     /* Yield, allowing the lua thread to suspend if this is a async
        script until the command is executed inside the event loop. */
@@ -719,15 +731,6 @@ void scriptingInit(void) {
         redisAssert(lua_pcall(lua,0,0,0) == LUA_OK);
     }
 
-    /* Create the (non connected) client that we use to execute Redis commands
-     * inside the Lua interpreter.
-     * Note: there is no need to create it again when this function is called
-     * by scriptingReset(). */
-    if (server.lua_client == NULL) {
-        server.lua_client = createClient(-1);
-        server.lua_client->flags |= REDIS_LUA_CLIENT;
-    }
-
     /* Lua beginners ofter don't use "local", this is likely to introduce
      * subtle bugs in their code. To prevent problems we protect accesses
      * to global variables. */
@@ -920,7 +923,6 @@ void luaCallAndReply(redisClient *c, int evalasync) {
      * make the Lua script execution slower. */
     // TODO: Should not be global
     server.lua_time_start = mstime();
-    server.lua_caller = c;
     server.lua_kill = 0;
 
     if (server.lua_time_limit > 0 && server.masterhost == NULL) {
@@ -953,10 +955,10 @@ void luaCallAndReply(redisClient *c, int evalasync) {
                           readQueryFromClient,c);
     }
 
-    // TODO: Should not be global
-    server.lua_caller = NULL;
+    if (c->lua_client) {
+        selectDb(c,c->lua_client->db->id); /* set DB ID from Lua client */
+    }
 
-    selectDb(c,server.lua_client->db->id); /* set DB ID from Lua client */
     lua_gc(lua,LUA_GCSTEP,1);
 
     if (status != LUA_OK) {
@@ -1064,12 +1066,10 @@ void evalGenericCommand(redisClient *c, int evalsha, int evalasync) {
     luaSetGlobalArray(lua_thread,"KEYS",c->argv+3,numkeys);
     luaSetGlobalArray(lua_thread,"ARGV",c->argv+3+numkeys,c->argc-3-numkeys);
 
-    /* Select the right DB in the context of the Lua client */
-    selectDb(server.lua_client,c->db->id);
-
     /* Keep a reference to the redis client in the lua thread */
+    lua_pushlightuserdata(lua_thread, (void *) lua_thread);
     lua_pushlightuserdata(lua_thread, (void *) c);
-    lua_setfield(lua_thread, LUA_REGISTRYINDEX, "redis_client");
+    lua_settable(lua_thread, LUA_REGISTRYINDEX);
 
     if (evalasync) {
         pthread_mutex_init(&c->lua_yield_mutex, NULL);
