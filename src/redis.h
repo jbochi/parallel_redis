@@ -528,19 +528,6 @@ typedef struct redisClient {
     dict *pubsub_channels;  /* channels a client is interested in (SUBSCRIBE) */
     list *pubsub_patterns;  /* patterns a client is interested in (SUBSCRIBE) */
 
-    /* Scripting */
-    lua_State *lua; /* The Lua interpreter */
-    lua_State *lua_thread;     /* The lua thread where async scripts are run */
-    struct redisClient *lua_client;   /* The "fake client" to query Redis from Lua */
-    pthread_mutex_t lua_yield_mutex; /* The mutex to allow async scripts to yield
-                                        and run commands inside the event loop. */
-    pthread_cond_t lua_yield_cv; /* The condition variable that signals that the
-                                    command has been executed and that the thread
-                                    can be resumed. */
-    struct redisCommand *script_cmd; /* The next command that should be run */
-    struct redisCommand *script_lastcmd; /* The last command executed */
-    sds script_cmd_reply; /* The last command result */
-
     /* Response buffer */
     int bufpos;
     char buf[REDIS_REPLY_CHUNK_BYTES];
