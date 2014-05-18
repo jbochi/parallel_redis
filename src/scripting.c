@@ -626,6 +626,10 @@ void scriptingEnableGlobalsProtection(lua_State *lua) {
  * assuming that we call scriptingRelease() before.
  * See scriptingReset() for more information. */
 void scriptingInit(void) {
+    //TODO: What should we initialize?
+}
+
+lua_State *luaStateInit(void) {
     lua_State *lua = luaL_newstate();
 
     luaLoadLibraries(lua);
@@ -736,14 +740,14 @@ void scriptingInit(void) {
      * to global variables. */
     scriptingEnableGlobalsProtection(lua);
 
-    server.lua = lua;
+    return lua;
 }
 
 /* Release resources related to Lua scripting.
  * This function is used in order to reset the scripting environment. */
 void scriptingRelease(void) {
     dictRelease(server.lua_scripts);
-    lua_close(server.lua);
+    //TODO: close any states. lua_close(server.lua);
 }
 
 void scriptingReset(void) {
@@ -861,6 +865,9 @@ void luaSetGlobalArray(lua_State *lua, char *var, robj **elev, int elec) {
  * On error REDIS_ERR is returned and an appropriate error is set in the
  * client context. */
 int luaCreateFunction(redisClient *c, lua_State *lua, char *funcname, robj *body) {
+    if (lua == NULL) {
+        lua = luaStateInit();
+    }
     sds funcdef = sdsempty();
 
     funcdef = sdscat(funcdef,"function ");
@@ -975,8 +982,8 @@ void luaCallAndReply(redisClient *c, int evalasync) {
         luaReplyToRedisReply(c,lua); /* Convert and consume the reply. */
     }
     /* Clean the lua thread */
-    lua_settop(server.lua, 0);
-    lua_gc(server.lua,LUA_GCSTEP,1);
+    lua_settop(c->lua, 0);
+    lua_gc(c->lua,LUA_GCSTEP,1);
 }
 
 static void *luaCallAndReplyAsyncThreadHandler(void * threadarg) {
@@ -991,9 +998,10 @@ void luaCallAndReplyAsync(redisClient *c) {
 }
 
 void evalGenericCommand(redisClient *c, int evalsha, int evalasync) {
-    lua_State *lua = server.lua;
+    lua_State *lua = luaStateInit();
     lua_State *lua_thread;
 
+    c->lua = lua;
     char funcname[43];
     long long numkeys;
 
@@ -1202,7 +1210,7 @@ void scriptCommand(redisClient *c) {
         sha1hex(funcname+2,c->argv[2]->ptr,sdslen(c->argv[2]->ptr));
         sha = sdsnewlen(funcname+2,40);
         if (dictFind(server.lua_scripts,sha) == NULL) {
-            if (luaCreateFunction(c,server.lua,funcname,c->argv[2])
+            if (luaCreateFunction(c,NULL,funcname,c->argv[2])
                     == REDIS_ERR) {
                 sdsfree(sha);
                 return;
