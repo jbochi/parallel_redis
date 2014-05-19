@@ -836,6 +836,10 @@ struct redisServer {
                              execution. */
     int lua_kill;         /* Kill the script if true. */
 
+    list *evalasync_tasks;      /* The list of EVALASYNC tasks to be executed */
+    pthread_mutex_t evalasync_queue_mutex;
+    pthread_cond_t evalasync_queue_cond;
+
     /* Assert & bug reporting */
     char *assert_failed;
     char *assert_file;

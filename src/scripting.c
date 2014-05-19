@@ -39,13 +39,13 @@
 #include <math.h>
 
 typedef struct evalTask {
-    redisClient *caller; /* The redis client */
+    redisClient *caller; /* The redis client that triggered the execution */
     lua_State *lua; /* The Lua interpreter */
     lua_State *lua_thread;     /* The lua thread where async scripts are run */
     struct redisClient *lua_client;   /* The "fake client" to query Redis from Lua */
     pthread_mutex_t lua_yield_mutex; /* The mutex to allow async scripts to yield
                                         and run commands inside the event loop. */
-    pthread_cond_t lua_yield_cv; /* The condition variable that signals that the
+    pthread_cond_t lua_yield_cond; /* The condition variable that signals that the
                                     command has been executed and that the thread
                                     can be resumed. */
     struct redisCommand *script_cmd; /* The next command that should be run */
@@ -634,14 +634,6 @@ void scriptingEnableGlobalsProtection(lua_State *lua) {
     sdsfree(code);
 }
 
-/* Initialize the scripting environment.
- * It is possible to call this function to reset the scripting environment
- * assuming that we call scriptingRelease() before.
- * See scriptingReset() for more information. */
-void scriptingInit(void) {
-    //TODO: What should we initialize?
-}
-
 lua_State *luaStateInit(void) {
     lua_State *lua = luaL_newstate();
 
@@ -928,7 +920,7 @@ void luaExecAndResumeThread(aeEventLoop *el, int fd, void *clientData, int mask)
         }
     }
     aeDeleteFileEvent(el, fd, mask);
-    pthread_cond_signal(&t->lua_yield_cv);
+    pthread_cond_signal(&t->lua_yield_cond);
     pthread_mutex_unlock(&t->lua_yield_mutex);
 }
 
@@ -963,7 +955,7 @@ void luaCallAndReply(evalTask *t, int evalasync) {
              * resume the script. */
             pthread_mutex_lock(&t->lua_yield_mutex);
             aeCreateFileEvent(server.el,c->fd,AE_WRITABLE,luaExecAndResumeThread,t);
-            pthread_cond_wait(&t->lua_yield_cv, &t->lua_yield_mutex);
+            pthread_cond_wait(&t->lua_yield_cond, &t->lua_yield_mutex);
             pthread_mutex_unlock(&t->lua_yield_mutex);
         }
         status = lua_resume(lua,NULL,0);
@@ -1003,15 +995,28 @@ void luaCallAndReply(evalTask *t, int evalasync) {
     lua_gc(t->lua,LUA_GCSTEP,1);
 }
 
-static void *luaCallAndReplyAsyncThreadHandler(void * threadarg) {
-    evalTask *t = (evalTask *) threadarg;
-    luaCallAndReply(t, 1);
-    pthread_exit(NULL);
+static void *evalAsyncExecutor(void * threadarg) {
+    while (1) {
+        pthread_mutex_lock(&server.evalasync_queue_mutex);
+        while (listLength(server.evalasync_tasks) == 0)
+            pthread_cond_wait(&server.evalasync_queue_cond, &server.evalasync_queue_mutex);
+        listNode *first = listFirst(server.evalasync_tasks);
+        listDelNode(server.evalasync_tasks, first);
+        luaCallAndReply((evalTask *) first->value, 1);
+        pthread_mutex_unlock(&server.evalasync_queue_mutex);
+    }
 }
 
-void luaCallAndReplyAsync(evalTask *t) {
+void addEvalAsyncTask(evalTask *t) {
+    pthread_mutex_lock(&server.evalasync_queue_mutex);
+    listAddNodeTail(server.evalasync_tasks,t);
+    pthread_mutex_unlock(&server.evalasync_queue_mutex);
+    pthread_cond_signal(&server.evalasync_queue_cond);
+}
+
+void createEvalAsyncExecutor() {
     pthread_t thread;
-    pthread_create(&thread,NULL,luaCallAndReplyAsyncThreadHandler,(void *) t);
+    pthread_create(&thread, NULL, evalAsyncExecutor, NULL);
 }
 
 void evalGenericCommand(redisClient *c, int evalsha, int evalasync) {
@@ -1026,7 +1031,6 @@ void evalGenericCommand(redisClient *c, int evalsha, int evalasync) {
     t->script_cmd = NULL;
     t->script_lastcmd = NULL;
     t->script_cmd_reply = NULL;
-
 
     char funcname[43];
     long long numkeys;
@@ -1106,8 +1110,8 @@ void evalGenericCommand(redisClient *c, int evalsha, int evalasync) {
 
     if (evalasync) {
         pthread_mutex_init(&t->lua_yield_mutex, NULL);
-        pthread_cond_init(&t->lua_yield_cv, NULL);
-        luaCallAndReplyAsync(t);
+        pthread_cond_init(&t->lua_yield_cond, NULL);
+        addEvalAsyncTask(t);
     } else {
         luaCallAndReply(t, 0);
     }
@@ -1255,5 +1259,20 @@ void scriptCommand(redisClient *c) {
         }
     } else {
         addReplyError(c, "Unknown SCRIPT subcommand or wrong # of args.");
+    }
+}
+
+/* Initialize the scripting environment.
+ * It is possible to call this function to reset the scripting environment
+ * assuming that we call scriptingRelease() before.
+ * See scriptingReset() for more information. */
+void scriptingInit(void) {
+    pthread_mutex_init(&server.evalasync_queue_mutex, NULL);
+    pthread_cond_init(&server.evalasync_queue_cond, NULL);
+    server.evalasync_tasks = listCreate();
+
+    int i;
+    for (i = 0; i < 4; i++) {
+        createEvalAsyncExecutor();
     }
 }
