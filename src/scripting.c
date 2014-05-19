@@ -998,12 +998,15 @@ void luaCallAndReply(evalTask *t, int evalasync) {
 static void *evalAsyncExecutor(void * threadarg) {
     while (1) {
         pthread_mutex_lock(&server.evalasync_queue_mutex);
-        while (listLength(server.evalasync_tasks) == 0)
+        while (listLength(server.evalasync_tasks) == 0) {
             pthread_cond_wait(&server.evalasync_queue_cond, &server.evalasync_queue_mutex);
+        }
         listNode *first = listFirst(server.evalasync_tasks);
+        evalTask *t = first->value;
         listDelNode(server.evalasync_tasks, first);
-        luaCallAndReply((evalTask *) first->value, 1);
         pthread_mutex_unlock(&server.evalasync_queue_mutex);
+
+        luaCallAndReply((evalTask *) t, 1);
     }
 }
 
