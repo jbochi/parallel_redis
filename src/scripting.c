@@ -38,20 +38,6 @@
 #include <ctype.h>
 #include <math.h>
 
-typedef struct evalTask {
-    redisClient *caller; /* The redis client that triggered the execution */
-    lua_State *lua; /* The Lua interpreter */
-    lua_State *lua_thread;     /* The lua thread where async scripts are run */
-    struct redisClient *lua_client;   /* The "fake client" to query Redis from Lua */
-    pthread_mutex_t lua_yield_mutex; /* The mutex to allow async scripts to yield
-                                        and run commands inside the event loop. */
-    pthread_cond_t lua_yield_cond; /* The condition variable that signals that the
-                                    command has been executed and that the thread
-                                    can be resumed. */
-    struct redisCommand *script_cmd; /* The next command that should be run */
-    struct redisCommand *script_lastcmd; /* The last command executed */
-    sds script_cmd_reply; /* The last command result */
-} evalTask;
 
 char *redisProtocolToLuaType_Int(lua_State *lua, char *reply);
 char *redisProtocolToLuaType_Bulk(lua_State *lua, char *reply);
@@ -226,7 +212,7 @@ sds luaRedisExecCommand(lua_State *lua, int async) {
     int propagateFlag = 0;
 
     evalTask *t = redisEvalTask(lua);
-    redisClient *c = t->lua_client;
+    redisClient *c = t->eval_thread->lua_client;
     sds reply;
 
     /* If this is an async execution, every command is propagated, instead
@@ -316,7 +302,7 @@ int luaRedisGenericCommand(lua_State *lua, int raise_error) {
     evalTask *t =  redisEvalTask(lua);
 
     robj **argv;
-    redisClient *c = t->lua_client;
+    redisClient *c = t->eval_thread->lua_client;
     if (c == NULL) {
         /* Create a fake client if this is the first command being executed */
         c = createClient(-1);
@@ -325,7 +311,7 @@ int luaRedisGenericCommand(lua_State *lua, int raise_error) {
         /* Select the right DB in the context of the Lua client */
         selectDb(c,t->caller->db->id);
 
-        t->lua_client = c;
+        t->eval_thread->lua_client = c;
     }
 
     /* Require at least one argument */
@@ -870,9 +856,6 @@ void luaSetGlobalArray(lua_State *lua, char *var, robj **elev, int elec) {
  * On error REDIS_ERR is returned and an appropriate error is set in the
  * client context. */
 int luaCreateFunction(redisClient *c, lua_State *lua, char *funcname, robj *body) {
-    if (lua == NULL) {
-        lua = luaStateInit();
-    }
     sds funcdef = sdsempty();
 
     funcdef = sdscat(funcdef,"function ");
@@ -900,10 +883,11 @@ int luaCreateFunction(redisClient *c, lua_State *lua, char *funcname, robj *body
      * so that we can replicate / write in the AOF all the
      * EVALSHA commands as EVAL using the original script. */
     {
-        int retval = dictAdd(server.lua_scripts,
-                             sdsnewlen(funcname+2,40),body);
-        redisAssertWithInfo(c,NULL,retval == DICT_OK);
-        incrRefCount(body);
+        //TODO: FIXME: Cannot run from thread
+        //int retval = dictAdd(server.lua_scripts,
+        //                     sdsnewlen(funcname+2,40),body);
+        //redisAssertWithInfo(c,NULL,retval == DICT_OK);
+        //incrRefCount(body);
     }
     return REDIS_OK;
 }
@@ -912,22 +896,24 @@ int luaCreateFunction(redisClient *c, lua_State *lua, char *funcname, robj *body
  * event loop before signaling the Lua thread that it can resume */
 void luaExecAndResumeThread(aeEventLoop *el, int fd, void *clientData, int mask) {
     evalTask *t = (evalTask *) clientData;
+    evalThread *th = t->eval_thread;
 
-    pthread_mutex_lock(&t->lua_yield_mutex);
+    pthread_mutex_lock(&th->lua_yield_mutex);
     if (t->script_cmd) {
         if (t->script_cmd->flags & REDIS_CMD_WRITE) {
-            t->script_cmd_reply = luaRedisExecCommand(t->lua_thread, 1);
+            t->script_cmd_reply = luaRedisExecCommand(th->lua_thread, 1);
         }
     }
     aeDeleteFileEvent(el, fd, mask);
-    pthread_cond_signal(&t->lua_yield_cond);
-    pthread_mutex_unlock(&t->lua_yield_mutex);
+    pthread_cond_signal(&th->lua_yield_cond);
+    pthread_mutex_unlock(&th->lua_yield_mutex);
 }
 
 /* Resumes a lua thread and runs it until completion, sending the reply to client. */
 void luaCallAndReply(evalTask *t, int evalasync) {
-    lua_State *lua = t->lua_thread;
     redisClient *c = t->caller;
+    evalThread *th = t->eval_thread;
+    lua_State *lua = th->lua_thread;
     int delhook = 0, status;
 
     /* Set a hook in order to be able to stop the script execution if it
@@ -953,10 +939,10 @@ void luaCallAndReply(evalTask *t, int evalasync) {
             /* If the Lua script yields, we create a time event to run any
              * pending Redis command inside the event loop before we
              * resume the script. */
-            pthread_mutex_lock(&t->lua_yield_mutex);
+            pthread_mutex_lock(&th->lua_yield_mutex);
             aeCreateFileEvent(server.el,c->fd,AE_WRITABLE,luaExecAndResumeThread,t);
-            pthread_cond_wait(&t->lua_yield_cond, &t->lua_yield_mutex);
-            pthread_mutex_unlock(&t->lua_yield_mutex);
+            pthread_cond_wait(&th->lua_yield_cond, &th->lua_yield_mutex);
+            pthread_mutex_unlock(&th->lua_yield_mutex);
         }
         status = lua_resume(lua,NULL,0);
     }
@@ -971,8 +957,8 @@ void luaCallAndReply(evalTask *t, int evalasync) {
                           readQueryFromClient,c);
     }
 
-    if (t->lua_client) {
-        selectDb(c,t->lua_client->db->id); /* set DB ID from Lua client */
+    if (th->lua_client) {
+        selectDb(c,th->lua_client->db->id); /* set DB ID from Lua client */
     }
 
     lua_gc(lua,LUA_GCSTEP,1);
@@ -991,52 +977,18 @@ void luaCallAndReply(evalTask *t, int evalasync) {
         luaReplyToRedisReply(c,lua); /* Convert and consume the reply. */
     }
     /* Clean the lua thread */
-    lua_settop(t->lua, 0);
-    lua_gc(t->lua,LUA_GCSTEP,1);
+    lua_settop(th->lua, 0);
+    lua_gc(th->lua,LUA_GCSTEP,1);
 }
 
-static void *evalAsyncExecutor(void * threadarg) {
-    while (1) {
-        pthread_mutex_lock(&server.evalasync_queue_mutex);
-        while (listLength(server.evalasync_tasks) == 0) {
-            pthread_cond_wait(&server.evalasync_queue_cond, &server.evalasync_queue_mutex);
-        }
-        listNode *first = listFirst(server.evalasync_tasks);
-        evalTask *t = first->value;
-        listDelNode(server.evalasync_tasks, first);
-        pthread_mutex_unlock(&server.evalasync_queue_mutex);
-
-        luaCallAndReply((evalTask *) t, 1);
-    }
-}
-
-void addEvalAsyncTask(evalTask *t) {
-    pthread_mutex_lock(&server.evalasync_queue_mutex);
-    listAddNodeTail(server.evalasync_tasks,t);
-    pthread_mutex_unlock(&server.evalasync_queue_mutex);
-    pthread_cond_signal(&server.evalasync_queue_cond);
-}
-
-void createEvalAsyncExecutor() {
-    pthread_t thread;
-    pthread_create(&thread, NULL, evalAsyncExecutor, NULL);
-}
-
-void evalGenericCommand(redisClient *c, int evalsha, int evalasync) {
-    lua_State *lua = luaStateInit();
+void executeEvalTask(evalTask *t) {
+    int evalsha = t->evalsha;
+    redisClient *c = t->caller;
+    lua_State *lua;
     lua_State *lua_thread;
 
-    evalTask *t = zmalloc(sizeof(struct evalTask));
-    t->lua = lua;
-    t->caller = c;
-    t->lua_thread = NULL;
-    t->lua_client = NULL;
-    t->script_cmd = NULL;
-    t->script_lastcmd = NULL;
-    t->script_cmd_reply = NULL;
-
     char funcname[43];
-    long long numkeys;
+    lua = t->eval_thread->lua;
 
     /* We want the same PRNG sequence at every call so that our PRNG is
      * not affected by external state. */
@@ -1050,16 +1002,10 @@ void evalGenericCommand(redisClient *c, int evalsha, int evalasync) {
      *
      * Thanks to this flag we'll raise an error every time a write command
      * is called after a random command was used. */
+
+    //TODO: This can't be global
     server.lua_random_dirty = 0;
     server.lua_write_dirty = 0;
-
-    /* Get the number of arguments that are keys */
-    if (getLongLongFromObjectOrReply(c,c->argv[2],&numkeys,NULL) != REDIS_OK)
-        return;
-    if (numkeys > (c->argc - 3)) {
-        addReplyError(c,"Number of keys can't be greater than number of args");
-        return;
-    }
 
     /* We obtain the script SHA1, then check if this function is already
      * defined into the Lua state */
@@ -1067,11 +1013,11 @@ void evalGenericCommand(redisClient *c, int evalsha, int evalasync) {
     funcname[1] = '_';
     if (!evalsha) {
         /* Hash the code if this is an EVAL call */
-        sha1hex(funcname+2,c->argv[1]->ptr,sdslen(c->argv[1]->ptr));
+        sha1hex(funcname+2,t->argv[1]->ptr,sdslen(t->argv[1]->ptr));
     } else {
         /* We already have the SHA if it is a EVALSHA */
         int j;
-        char *sha = c->argv[1]->ptr;
+        char *sha = t->argv[1]->ptr;
 
         for (j = 0; j < 40; j++)
             funcname[j+2] = tolower(sha[j]);
@@ -1085,10 +1031,11 @@ void evalGenericCommand(redisClient *c, int evalsha, int evalasync) {
          * body of the function. If this is an EVALSHA call we can just
          * return an error. */
         if (evalsha) {
+            // TODO: Maybe it was defined in another state
             addReply(c, shared.noscripterr);
             return;
         }
-        if (luaCreateFunction(c,lua,funcname,c->argv[1]) == REDIS_ERR) {
+        if (luaCreateFunction(c,lua,funcname,t->argv[1]) == REDIS_ERR) {
             /* The error is sent to the client by luaCreateFunction()
              * itself when it returns REDIS_ERR. */
             return;
@@ -1098,26 +1045,20 @@ void evalGenericCommand(redisClient *c, int evalsha, int evalasync) {
 
     /* Start a new thread and push the function into the stack */
     lua_thread = lua_newthread(lua);
-    t->lua_thread = lua_thread;
+    t->eval_thread->lua_thread = lua_thread;
     lua_getglobal(lua_thread, funcname);
     redisAssert(!lua_isnil(lua,-1));
 
     /* Populate the argv and keys table accordingly to the arguments that
      * EVAL received. */
-    luaSetGlobalArray(lua_thread,"KEYS",c->argv+3,numkeys);
-    luaSetGlobalArray(lua_thread,"ARGV",c->argv+3+numkeys,c->argc-3-numkeys);
+    luaSetGlobalArray(lua_thread,"KEYS",t->argv+3,t->numkeys);
+    luaSetGlobalArray(lua_thread,"ARGV",t->argv+3+t->numkeys,t->argc-3-t->numkeys);
 
-    /* Keep a reference to the redis client in the lua thread */
+    /* Keep a reference to the eval task in the lua thread */
     lua_pushlightuserdata(lua_thread, (void *) t);
     lua_setfield(lua_thread, LUA_REGISTRYINDEX, "redisEvalTask");
 
-    if (evalasync) {
-        pthread_mutex_init(&t->lua_yield_mutex, NULL);
-        pthread_cond_init(&t->lua_yield_cond, NULL);
-        addEvalAsyncTask(t);
-    } else {
-        luaCallAndReply(t, 0);
-    }
+    luaCallAndReply(t, evalsha);
 
     /* EVALSHA should be propagated to Slave and AOF file as full EVAL, unless
      * we are sure that the script was already in the context of all the
@@ -1130,19 +1071,105 @@ void evalGenericCommand(redisClient *c, int evalsha, int evalasync) {
      * flush our cache of scripts that can be replicated as EVALSHA, while
      * for AOF we need to do so every time we rewrite the AOF file. */
     if (evalsha) {
-        if (!replicationScriptCacheExists(c->argv[1]->ptr)) {
+        if (!replicationScriptCacheExists(t->argv[1]->ptr)) {
             /* This script is not in our script cache, replicate it as
              * EVAL, then add it into the script cache, as from now on
              * slaves and AOF know about it. */
-            robj *script = dictFetchValue(server.lua_scripts,c->argv[1]->ptr);
+            robj *script = dictFetchValue(server.lua_scripts,t->argv[1]->ptr);
 
-            replicationScriptCacheAdd(c->argv[1]->ptr);
+            replicationScriptCacheAdd(t->argv[1]->ptr);
             redisAssertWithInfo(c,NULL,script != NULL);
             rewriteClientCommandArgument(c,0,
                 resetRefCount(createStringObject("EVAL",4)));
             rewriteClientCommandArgument(c,1,script);
             forceCommandPropagation(c,REDIS_PROPAGATE_REPL|REDIS_PROPAGATE_AOF);
         }
+    }
+}
+
+static void *evalAsyncExecutor(void * threadarg) {
+    evalThread *th = (evalThread *) threadarg;
+
+    while (1) {
+        pthread_mutex_lock(&server.evalasync_queue_mutex);
+        while (listLength(server.evalasync_tasks) == 0) {
+            pthread_cond_wait(&server.evalasync_queue_cond, &server.evalasync_queue_mutex);
+        }
+        listNode *first = listFirst(server.evalasync_tasks);
+        evalTask *t = first->value;
+        listDelNode(server.evalasync_tasks, first);
+        pthread_mutex_unlock(&server.evalasync_queue_mutex);
+
+        t->eval_thread = th;
+        executeEvalTask((evalTask *) t);
+    }
+}
+
+evalThread *createEvalThread() {
+    evalThread *th = zmalloc(sizeof(struct evalThread));
+    th->lua = luaStateInit();
+    th->lua_client = NULL;
+    return th;
+}
+
+void createEvalAsyncExecutor() {
+    evalThread *th = createEvalThread();
+    pthread_mutex_init(&th->lua_yield_mutex, NULL);
+    pthread_cond_init(&th->lua_yield_cond, NULL);
+
+    pthread_t thread;
+    pthread_create(&thread, NULL, evalAsyncExecutor, (void *) th);
+}
+
+void addEvalAsyncTask(evalTask *t) {
+    pthread_mutex_lock(&server.evalasync_queue_mutex);
+    listAddNodeTail(server.evalasync_tasks,t);
+    pthread_mutex_unlock(&server.evalasync_queue_mutex);
+    pthread_cond_signal(&server.evalasync_queue_cond);
+}
+
+void evalGenericCommand(redisClient *c, int evalsha, int evalasync) {
+    long long numkeys;
+
+    /* Get the number of arguments that are keys */
+    if (getLongLongFromObjectOrReply(c,c->argv[2],&numkeys,NULL) != REDIS_OK)
+        return;
+    if (numkeys > (c->argc - 3)) {
+        addReplyError(c,"Number of keys can't be greater than number of args");
+        return;
+    }
+
+    evalTask *t = zmalloc(sizeof(struct evalTask));
+
+    t->caller = c;
+    t->evalsha = evalsha;
+    t->evalasync = evalasync;
+    t->argc = c->argc;
+    t->argv = zmalloc(sizeof(robj*)*c->argc*10);
+    if (evalasync) {
+        for (int i = 0; i < c->argc; i++) {
+            t->argv[i] = zmalloc(sizeof(robj));
+            t->argv[i]->ptr = (robj *) sdsdup((char *) c->argv[i]->ptr);
+            //TODO: Free
+        }
+    } else {
+        t->argv = c->argv;
+    }
+    t->numkeys = numkeys;
+    t->script_cmd = NULL;
+    t->script_lastcmd = NULL;
+    t->script_cmd_reply = NULL;
+
+    if (!evalasync) {
+        t->eval_thread = server.eval_thread;
+    } else {
+        t->eval_thread = NULL;
+    }
+
+    if (evalasync) {
+        addEvalAsyncTask(t);
+    } else {
+        executeEvalTask(t);
     }
 }
 
@@ -1270,6 +1297,8 @@ void scriptCommand(redisClient *c) {
  * assuming that we call scriptingRelease() before.
  * See scriptingReset() for more information. */
 void scriptingInit(void) {
+    server.eval_thread = createEvalThread();
+
     pthread_mutex_init(&server.evalasync_queue_mutex, NULL);
     pthread_cond_init(&server.evalasync_queue_cond, NULL);
     server.evalasync_tasks = listCreate();

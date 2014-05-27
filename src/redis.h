@@ -69,7 +69,7 @@
 /* Static server configuration */
 #define REDIS_DEFAULT_HZ        10      /* Time interrupt calls/sec. */
 #define REDIS_MIN_HZ            1
-#define REDIS_MAX_HZ            500 
+#define REDIS_MAX_HZ            500
 #define REDIS_SERVERPORT        6379    /* TCP port */
 #define REDIS_TCP_BACKLOG       511     /* TCP listen backlog */
 #define REDIS_MAXIDLETIME       0       /* default client timeout: infinite */
@@ -613,6 +613,30 @@ typedef struct redisOpArray {
 
 struct clusterState;
 
+typedef struct evalThread {
+    lua_State *lua; /* The Lua interpreter */
+    lua_State *lua_thread;     /* The lua thread where async scripts are run */
+    struct redisClient *lua_client;   /* The "fake client" to query Redis from Lua */
+    pthread_mutex_t lua_yield_mutex; /* The mutex to allow async scripts to yield
+                                        and run commands inside the event loop. */
+    pthread_cond_t lua_yield_cond; /* The condition variable that signals that the
+                                    command has been executed and that the thread
+                                    can be resumed. */
+} evalThread;
+
+typedef struct evalTask {
+    evalThread *eval_thread;
+    redisClient *caller; /* The redis client that triggered the execution */
+    int evalsha;
+    int evalasync;
+    int argc;
+    robj **argv;
+    long long numkeys;
+    struct redisCommand *script_cmd; /* The next command that should be run */
+    struct redisCommand *script_lastcmd; /* The last command executed */
+    sds script_cmd_reply; /* The last command result */
+} evalTask;
+
 struct redisServer {
     /* General */
     char *configfile;           /* Absolute config file path, or NULL */
@@ -826,6 +850,7 @@ struct redisServer {
     redisClient *lua_caller;   /* The client running EVAL right now, or NULL */
     dict *lua_scripts;         /* A dictionary of SHA1 -> Lua scripts */
     mstime_t lua_time_limit;  /* Script timeout in milliseconds */
+    evalThread *eval_thread;
     //TODO: Should be per client
     mstime_t lua_time_start;  /* Start time of script, milliseconds time */
     int lua_write_dirty;  /* True if a write command was called during the
