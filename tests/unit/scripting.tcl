@@ -43,6 +43,10 @@ start_server {tags {"scripting"}} {
         r eval {return redis.call('get','mykey')} 0
     } {myval}
 
+    test {EVALASYNC - Does Lua interpreter replies to our requests asynchronously?} {
+        r evalasync {return 'hello'} 0
+    } {hello}
+
     test {EVALASYNC - is Lua able to call Redis API asynchronously?} {
         r set mykey myval
         r evalasync {return redis.call('get','mykey')} 0
