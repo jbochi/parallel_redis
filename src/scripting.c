@@ -868,12 +868,14 @@ int luaCreateFunction(redisClient *c, lua_State *lua, char *funcname, robj *body
      * EVALSHA commands as EVAL using the original script. */
     {
         // TODO: FIX ME. Should Acquire lock to access dict.
-        int retval = dictAdd(server.lua_scripts,
-                            sdsnewlen(funcname+2,40),body);
+        sds hash = sdsnewlen(funcname+2,40);
+        int retval = dictAdd(server.lua_scripts,hash,body);
         if (retval == DICT_OK) {
             /* The script can already be in the dict
              * if it was defined in another Lua State. */
             incrRefCount(body);
+        } else {
+            sdsfree(hash);
         }
     }
     return REDIS_OK;
