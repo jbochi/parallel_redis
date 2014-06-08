@@ -627,11 +627,6 @@ lua_State *luaStateInit(void) {
     luaLoadLibraries(lua);
     luaRemoveUnsupportedFunctions(lua);
 
-    /* Initialize a dictionary we use to map SHAs to scripts.
-     * This is useful for replication, as we need to replicate EVALSHA
-     * as EVAL, so we need to remember the associated script. */
-    server.lua_scripts = dictCreate(&shaScriptObjectDictType,NULL);
-
     /* Register the redis commands table and fields */
     lua_newtable(lua);
 
@@ -872,11 +867,14 @@ int luaCreateFunction(redisClient *c, lua_State *lua, char *funcname, robj *body
      * so that we can replicate / write in the AOF all the
      * EVALSHA commands as EVAL using the original script. */
     {
-        //TODO: FIXME: Cannot run from thread
-        //int retval = dictAdd(server.lua_scripts,
-        //                     sdsnewlen(funcname+2,40),body);
-        //redisAssertWithInfo(c,NULL,retval == DICT_OK);
-        //incrRefCount(body);
+        // TODO: FIX ME. Should Acquire lock to access dict.
+        int retval = dictAdd(server.lua_scripts,
+                            sdsnewlen(funcname+2,40),body);
+        if (retval == DICT_OK) {
+            /* The script can already be in the dict
+             * if it was defined in another Lua State. */
+            incrRefCount(body);
+        }
     }
     return REDIS_OK;
 }
@@ -1028,14 +1026,21 @@ void executeEvalTask(evalTask *t) {
     lua_getglobal(lua, funcname);
     if (lua_isnil(lua,-1)) {
         /* Function not defined... let's define it if we have the
-         * body of the function. If this is an EVALSHA call we can just
-         * return an error. */
-        if (evalsha) {
-            // TODO: Maybe it was defined in another state
-            addReply(c, shared.noscripterr);
-            return;
+         * body of the function. */
+        robj *script;
+        if (!evalsha) {
+            script = t->argv[1];
+        } else {
+            sds hash = sdsnew(funcname + 2);
+            // TODO: FIX ME. Should Acquire lock to access dict.
+            script = dictFetchValue(server.lua_scripts,hash);
+            /* If script does not exist we can just return an error. */
+            if (!script) {
+                addReply(c, shared.noscripterr);
+                return;
+            }
         }
-        if (luaCreateFunction(c,lua,funcname,t->argv[1]) == REDIS_ERR) {
+        if (luaCreateFunction(c,lua,funcname,script) == REDIS_ERR) {
             /* The error is sent to the client by luaCreateFunction()
              * itself when it returns REDIS_ERR. */
             return;
@@ -1075,6 +1080,7 @@ void executeEvalTask(evalTask *t) {
             /* This script is not in our script cache, replicate it as
              * EVAL, then add it into the script cache, as from now on
              * slaves and AOF know about it. */
+            // TODO: FIX ME. Should Acquire lock to access dict.
             robj *script = dictFetchValue(server.lua_scripts,t->argv[1]->ptr);
 
             replicationScriptCacheAdd(t->argv[1]->ptr);
@@ -1148,6 +1154,12 @@ void addEvalAsyncTask(evalTask *t) {
  * See scriptingReset() for more information. */
 void scriptingInit(void) {
     int i;
+
+    /* Initialize a dictionary we use to map SHAs to scripts.
+     * This is useful for replication, as we need to replicate EVALSHA
+     * as EVAL, so we need to remember the associated script. */
+    server.lua_scripts = dictCreate(&shaScriptObjectDictType,NULL);
+
     server.eval_thread = createEvalThread();
 
     pthread_mutex_init(&server.evalasync_queue_mutex, NULL);
