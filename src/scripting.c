@@ -309,11 +309,11 @@ int luaRedisGenericCommand(lua_State *lua, int raise_error) {
         c = createClient(-1);
         c->flags |= REDIS_LUA_CLIENT | REDIS_CLOSE_ASAP;
 
-        /* Select the right DB in the context of the Lua client */
-        selectDb(c,t->caller->db->id);
-
         t->eval_thread->lua_client = c;
     }
+
+    /* Select the right DB in the context of the Lua client */
+    selectDb(c,t->caller->db->id);
 
     /* Require at least one argument */
     if (argc == 0) {
