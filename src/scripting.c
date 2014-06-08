@@ -970,12 +970,14 @@ void luaCallAndReply(evalTask *t) {
 }
 
 void releaseEvalTask(evalTask *t) {
-    //TODO: Free copied args. Code below is not working
-    // int i;
-    // for (i = 0; i < t->argc; i++) {
-    //     decrRefCount(t->argv[i]);
-    // }
-    // zfree(t->argv);
+    int i;
+    if (t->evalasync) {
+        /* We must clean the args copied for eval async call. */
+        for (i = 0; i < t->argc; i++) {
+            decrRefCount(t->argv[i]);
+        }
+        zfree(t->argv);
+    }
     zfree(t);
 }
 
@@ -1031,9 +1033,10 @@ void executeEvalTask(evalTask *t) {
         if (!evalsha) {
             script = t->argv[1];
         } else {
-            sds hash = sdsnew(funcname + 2);
             // TODO: FIX ME. Should Acquire lock to access dict.
+            sds hash = sdsnew(funcname + 2);
             script = dictFetchValue(server.lua_scripts,hash);
+            sdsfree(hash);
             /* If script does not exist we can just return an error. */
             if (!script) {
                 addReply(c, shared.noscripterr);
@@ -1236,9 +1239,11 @@ void evalGenericCommand(redisClient *c, int evalsha, int evalasync) {
     t->argc = c->argc;
     t->argv = zmalloc(sizeof(robj*)*c->argc*10);
     if (evalasync) {
+        /* We have to copy the args for async calls */
         for (int i = 0; i < c->argc; i++) {
             t->argv[i] = zmalloc(sizeof(robj));
             t->argv[i]->ptr = (robj *) sdsdup((char *) c->argv[i]->ptr);
+            incrRefCount(t->argv[i]);
         }
     } else {
         t->argv = c->argv;
