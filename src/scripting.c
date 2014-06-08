@@ -1168,8 +1168,6 @@ void scriptingRelease(void) {
     listIter *iter;
     listNode *node;
     void **retval = NULL;
-    dictRelease(server.lua_scripts);
-    releaseEvalThread(server.eval_thread);
 
     // Add one terminator per worker to kill all workers
     for (i = 0; i < listLength(server.evalasync_executors); i++) {
@@ -1194,6 +1192,12 @@ void scriptingRelease(void) {
     // Assert there are no pending tasks and release list
     redisAssert(listLength(server.evalasync_tasks) == 0);
     listRelease(server.evalasync_tasks);
+
+    // Release server globals
+    pthread_mutex_destroy(&server.evalasync_queue_mutex);
+    pthread_cond_destroy(&server.evalasync_queue_cond);
+    dictRelease(server.lua_scripts);
+    releaseEvalThread(server.eval_thread);
 }
 
 void scriptingReset(void) {
