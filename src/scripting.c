@@ -971,7 +971,8 @@ void luaCallAndReply(evalTask *t) {
 
 void releaseEvalTask(evalTask *t) {
     int i;
-    if (t->evalasync) {
+    // TODO: Why evalsha does not need to have memory cleared!?
+    if (t->evalasync && !t->evalsha) {
         /* We must clean the args copied for eval async call. */
         for (i = 0; i < t->argc; i++) {
             decrRefCount(t->argv[i]);
@@ -1078,7 +1079,7 @@ void executeEvalTask(evalTask *t) {
      * For repliation, everytime a new slave attaches to the master, we need to
      * flush our cache of scripts that can be replicated as EVALSHA, while
      * for AOF we need to do so every time we rewrite the AOF file. */
-    if (evalsha) {
+    if (evalsha && !t->evalasync) {
         if (!replicationScriptCacheExists(t->argv[1]->ptr)) {
             /* This script is not in our script cache, replicate it as
              * EVAL, then add it into the script cache, as from now on
