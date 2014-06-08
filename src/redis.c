@@ -1434,7 +1434,6 @@ void initServerConfig() {
     server.cluster_configfile = zstrdup(REDIS_DEFAULT_CLUSTER_CONFIG_FILE);
     server.lua_caller = NULL; // TODO: Should be a list?
     server.lua_time_limit = REDIS_LUA_TIME_LIMIT;
-    server.lua_timedout = 0;
     server.migrate_cached_sockets = dictCreate(&migrateCacheDictType,NULL);
     server.loading_process_events_interval_bytes = (1024*1024*2);
 
@@ -2197,7 +2196,7 @@ int processCommand(redisClient *c) {
     }
 
     /* Lua script too slow? Only allow a limited number of commands. */
-    if (server.lua_timedout &&
+    if (server.eval_thread->lua_timedout &&
           c->cmd->proc != authCommand &&
           c->cmd->proc != replconfCommand &&
         !(c->cmd->proc == shutdownCommand &&

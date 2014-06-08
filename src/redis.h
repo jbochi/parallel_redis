@@ -623,6 +623,17 @@ typedef struct evalThread {
                                     command has been executed and that the thread
                                     can be resumed. */
     pthread_t thread;
+
+    // Current script variables:
+    mstime_t lua_time_start;  /* Start time of script, milliseconds time */
+    int lua_write_dirty;  /* True if a write command was called during the
+                             execution of the current script. */
+    int lua_random_dirty; /* True if a random command was called during the
+                             execution of the current script. */
+    int lua_timedout;     /* True if we reached the time limit for script
+                             execution. */
+    int lua_kill;         /* Kill the script if true. */
+
 } evalThread;
 
 typedef struct evalTask {
@@ -853,16 +864,6 @@ struct redisServer {
     dict *lua_scripts;         /* A dictionary of SHA1 -> Lua scripts */
     mstime_t lua_time_limit;  /* Script timeout in milliseconds */
     evalThread *eval_thread;
-    //TODO: Should be per client
-    mstime_t lua_time_start;  /* Start time of script, milliseconds time */
-    int lua_write_dirty;  /* True if a write command was called during the
-                             execution of the current script. */
-    int lua_random_dirty; /* True if a random command was called during the
-                             execution of the current script. */
-    int lua_timedout;     /* True if we reached the time limit for script
-                             execution. */
-    int lua_kill;         /* Kill the script if true. */
-
     list *evalasync_executors;      /* The list of EVALASYNC workers */
     list *evalasync_tasks;          /* The list of EVALASYNC tasks to be executed */
     pthread_mutex_t evalasync_queue_mutex;
