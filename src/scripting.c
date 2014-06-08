@@ -1238,9 +1238,9 @@ void evalGenericCommand(redisClient *c, int evalsha, int evalasync) {
     t->evalsha = evalsha;
     t->evalasync = evalasync;
     t->argc = c->argc;
-    t->argv = zmalloc(sizeof(robj*)*c->argc*10);
     if (evalasync) {
         /* We have to copy the args for async calls */
+        t->argv = zmalloc(sizeof(robj*)*c->argc);
         for (int i = 0; i < c->argc; i++) {
             t->argv[i] = zmalloc(sizeof(robj));
             t->argv[i]->ptr = (robj *) sdsdup((char *) c->argv[i]->ptr);
