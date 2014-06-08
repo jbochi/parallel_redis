@@ -910,7 +910,8 @@ void luaExecAndResumeThread(aeEventLoop *el, int fd, void *clientData, int mask)
 }
 
 /* Resumes a lua thread and runs it until completion, sending the reply to client. */
-void luaCallAndReply(evalTask *t, int evalasync) {
+void luaCallAndReply(evalTask *t) {
+    int evalasync = t->evalasync;
     redisClient *c = t->caller;
     evalThread *th = t->eval_thread;
     lua_State *lua = th->lua_thread;
@@ -1058,7 +1059,7 @@ void executeEvalTask(evalTask *t) {
     lua_pushlightuserdata(lua_thread, (void *) t);
     lua_setfield(lua_thread, LUA_REGISTRYINDEX, "redisEvalTask");
 
-    luaCallAndReply(t, evalsha);
+    luaCallAndReply(t);
 
     /* EVALSHA should be propagated to Slave and AOF file as full EVAL, unless
      * we are sure that the script was already in the context of all the
