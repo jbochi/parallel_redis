@@ -972,7 +972,12 @@ void luaCallAndReply(evalTask *t) {
 }
 
 void releaseEvalTask(evalTask *t) {
-    //TODO: Free copied args
+    //TODO: Free copied args. Code below is not working
+    // int i;
+    // for (i = 0; i < t->argc; i++) {
+    //     decrRefCount(t->argv[i]);
+    // }
+    // zfree(t->argv);
     zfree(t);
 }
 
