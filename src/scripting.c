@@ -973,8 +973,7 @@ void luaCallAndReply(evalTask *t) {
 
 void releaseEvalTask(evalTask *t) {
     int i;
-    // TODO: Why evalsha does not need to have memory cleared!?
-    if (t->evalasync && !t->evalsha) {
+    if (t->evalasync && !t->terminator) {
         /* We must clean the args copied for eval async call. */
         for (i = 0; i < t->argc; i++) {
             decrRefCount(t->argv[i]);
@@ -1242,11 +1241,9 @@ void evalGenericCommand(redisClient *c, int evalsha, int evalasync) {
     t->argc = c->argc;
     if (evalasync) {
         /* We have to copy the args for async calls */
-        t->argv = zmalloc(sizeof(robj*)*c->argc);
+        t->argv = (robj **) zmalloc(sizeof(robj*)*c->argc);
         for (int i = 0; i < c->argc; i++) {
-            t->argv[i] = zmalloc(sizeof(robj));
-            t->argv[i]->ptr = (robj *) sdsdup((char *) c->argv[i]->ptr);
-            incrRefCount(t->argv[i]);
+            t->argv[i] = createObject(REDIS_STRING, sdsdup(c->argv[i]->ptr));
         }
     } else {
         t->argv = c->argv;
