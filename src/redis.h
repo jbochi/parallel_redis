@@ -622,6 +622,7 @@ typedef struct evalThread {
     pthread_cond_t lua_yield_cond; /* The condition variable that signals that the
                                     command has been executed and that the thread
                                     can be resumed. */
+    pthread_t thread;
 } evalThread;
 
 typedef struct evalTask {

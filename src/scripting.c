@@ -38,6 +38,7 @@
 #include <ctype.h>
 #include <math.h>
 
+#define NUM_LUA_WORKERS 4
 
 char *redisProtocolToLuaType_Int(lua_State *lua, char *reply);
 char *redisProtocolToLuaType_Bulk(lua_State *lua, char *reply);
@@ -734,18 +735,6 @@ lua_State *luaStateInit(void) {
     return lua;
 }
 
-/* Release resources related to Lua scripting.
- * This function is used in order to reset the scripting environment. */
-void scriptingRelease(void) {
-    dictRelease(server.lua_scripts);
-    //TODO: close any states. lua_close(server.lua);
-}
-
-void scriptingReset(void) {
-    scriptingRelease();
-    scriptingInit();
-}
-
 /* Perform the SHA1 of the input string. We use this both for hashing script
  * bodies in order to obtain the Lua function name, and in the implementation
  * of redis.sha1().
@@ -1113,13 +1102,55 @@ evalThread *createEvalThread() {
     return th;
 }
 
+void releaseEvalThread(evalThread *th) {
+    lua_close(th->lua);
+    pthread_kill(th->thread, SIGTERM);
+    zfree(th);
+}
+
 void createEvalAsyncExecutor() {
     evalThread *th = createEvalThread();
     pthread_mutex_init(&th->lua_yield_mutex, NULL);
     pthread_cond_init(&th->lua_yield_cond, NULL);
+    pthread_create(&th->thread, NULL, evalAsyncExecutor, (void *) th);
+}
 
-    pthread_t thread;
-    pthread_create(&thread, NULL, evalAsyncExecutor, (void *) th);
+/* Initialize the scripting environment.
+ * It is possible to call this function to reset the scripting environment
+ * assuming that we call scriptingRelease() before.
+ * See scriptingReset() for more information. */
+void scriptingInit(void) {
+    int i;
+    server.eval_thread = createEvalThread();
+
+    pthread_mutex_init(&server.evalasync_queue_mutex, NULL);
+    pthread_cond_init(&server.evalasync_queue_cond, NULL);
+    server.evalasync_tasks = listCreate();
+
+    for (i = 0; i < NUM_LUA_WORKERS; i++) {
+        createEvalAsyncExecutor();
+    }
+}
+
+/* Release resources related to Lua scripting.
+ * This function is used in order to reset the scripting environment. */
+void scriptingRelease(void) {
+    listIter *iter;
+    listNode *node;
+    dictRelease(server.lua_scripts);
+    releaseEvalThread(server.eval_thread);
+
+    iter = listGetIterator(server.evalasync_tasks, AL_START_HEAD);
+    while ((node = listNext(iter)) != NULL) {
+        releaseEvalThread(listNodeValue(node));
+    }
+    listReleaseIterator(iter);
+    listRelease(server.evalasync_tasks);
+}
+
+void scriptingReset(void) {
+    scriptingRelease();
+    scriptingInit();
 }
 
 void addEvalAsyncTask(evalTask *t) {
@@ -1151,7 +1182,7 @@ void evalGenericCommand(redisClient *c, int evalsha, int evalasync) {
         for (int i = 0; i < c->argc; i++) {
             t->argv[i] = zmalloc(sizeof(robj));
             t->argv[i]->ptr = (robj *) sdsdup((char *) c->argv[i]->ptr);
-            //TODO: Free
+            //TODO: Free copied args
         }
     } else {
         t->argv = c->argv;
@@ -1290,22 +1321,5 @@ void scriptCommand(redisClient *c) {
         }
     } else {
         addReplyError(c, "Unknown SCRIPT subcommand or wrong # of args.");
-    }
-}
-
-/* Initialize the scripting environment.
- * It is possible to call this function to reset the scripting environment
- * assuming that we call scriptingRelease() before.
- * See scriptingReset() for more information. */
-void scriptingInit(void) {
-    server.eval_thread = createEvalThread();
-
-    pthread_mutex_init(&server.evalasync_queue_mutex, NULL);
-    pthread_cond_init(&server.evalasync_queue_cond, NULL);
-    server.evalasync_tasks = listCreate();
-
-    int i;
-    for (i = 0; i < 4; i++) {
-        createEvalAsyncExecutor();
     }
 }
