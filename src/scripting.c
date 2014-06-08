@@ -971,6 +971,11 @@ void luaCallAndReply(evalTask *t) {
     lua_gc(th->lua,LUA_GCSTEP,1);
 }
 
+void releaseEvalTask(evalTask *t) {
+    //TODO: Free copied args
+    zfree(t);
+}
+
 void executeEvalTask(evalTask *t) {
     int evalsha = t->evalsha;
     redisClient *c = t->caller;
@@ -1091,7 +1096,13 @@ static void *evalAsyncExecutor(void * threadarg) {
         pthread_mutex_unlock(&server.evalasync_queue_mutex);
 
         t->eval_thread = th;
+        if (t->terminator) {
+            releaseEvalTask(t);
+            pthread_exit(NULL);
+            break;
+        }
         executeEvalTask((evalTask *) t);
+        releaseEvalTask(t);
     }
 }
 
@@ -1103,16 +1114,27 @@ evalThread *createEvalThread() {
 }
 
 void releaseEvalThread(evalThread *th) {
+    if (th->lua_client) {
+        // TODO: Is this needed?
+        //freeClient(th->lua_client);
+    }
     lua_close(th->lua);
-    pthread_kill(th->thread, SIGTERM);
     zfree(th);
 }
 
-void createEvalAsyncExecutor() {
+evalThread *createEvalAsyncExecutor() {
     evalThread *th = createEvalThread();
     pthread_mutex_init(&th->lua_yield_mutex, NULL);
     pthread_cond_init(&th->lua_yield_cond, NULL);
     pthread_create(&th->thread, NULL, evalAsyncExecutor, (void *) th);
+    return th;
+}
+
+void addEvalAsyncTask(evalTask *t) {
+    pthread_mutex_lock(&server.evalasync_queue_mutex);
+    listAddNodeTail(server.evalasync_tasks,t);
+    pthread_mutex_unlock(&server.evalasync_queue_mutex);
+    pthread_cond_signal(&server.evalasync_queue_cond);
 }
 
 /* Initialize the scripting environment.
@@ -1126,38 +1148,52 @@ void scriptingInit(void) {
     pthread_mutex_init(&server.evalasync_queue_mutex, NULL);
     pthread_cond_init(&server.evalasync_queue_cond, NULL);
     server.evalasync_tasks = listCreate();
+    server.evalasync_executors = listCreate();
 
     for (i = 0; i < NUM_LUA_WORKERS; i++) {
-        createEvalAsyncExecutor();
+        evalThread *th = createEvalAsyncExecutor();
+        listAddNodeTail(server.evalasync_executors, th);
     }
 }
 
 /* Release resources related to Lua scripting.
  * This function is used in order to reset the scripting environment. */
 void scriptingRelease(void) {
+    int i;
     listIter *iter;
     listNode *node;
+    void **retval = NULL;
     dictRelease(server.lua_scripts);
     releaseEvalThread(server.eval_thread);
 
-    iter = listGetIterator(server.evalasync_tasks, AL_START_HEAD);
+    // Add one terminator per worker to kill all workers
+    for (i = 0; i < listLength(server.evalasync_executors); i++) {
+        evalTask *t = zmalloc(sizeof(struct evalTask));
+        t->terminator = 1;
+        addEvalAsyncTask(t);
+    }
+
+    // Release workers
+    iter = listGetIterator(server.evalasync_executors, AL_START_HEAD);
     while ((node = listNext(iter)) != NULL) {
-        releaseEvalThread(listNodeValue(node));
+        evalThread *th = listNodeValue(node);
+        // TODO: Fix deadlock when async task tries to call redis.
+        pthread_join(th->thread, retval);
+        pthread_mutex_destroy(&th->lua_yield_mutex);
+        pthread_cond_destroy(&th->lua_yield_cond);
+        releaseEvalThread(th);
     }
     listReleaseIterator(iter);
+    listRelease(server.evalasync_executors);
+
+    // Assert there are no pending tasks and release list
+    redisAssert(listLength(server.evalasync_tasks) == 0);
     listRelease(server.evalasync_tasks);
 }
 
 void scriptingReset(void) {
     scriptingRelease();
     scriptingInit();
-}
-
-void addEvalAsyncTask(evalTask *t) {
-    pthread_mutex_lock(&server.evalasync_queue_mutex);
-    listAddNodeTail(server.evalasync_tasks,t);
-    pthread_mutex_unlock(&server.evalasync_queue_mutex);
-    pthread_cond_signal(&server.evalasync_queue_cond);
 }
 
 void evalGenericCommand(redisClient *c, int evalsha, int evalasync) {
@@ -1182,7 +1218,6 @@ void evalGenericCommand(redisClient *c, int evalsha, int evalasync) {
         for (int i = 0; i < c->argc; i++) {
             t->argv[i] = zmalloc(sizeof(robj));
             t->argv[i]->ptr = (robj *) sdsdup((char *) c->argv[i]->ptr);
-            //TODO: Free copied args
         }
     } else {
         t->argv = c->argv;
@@ -1191,6 +1226,7 @@ void evalGenericCommand(redisClient *c, int evalsha, int evalasync) {
     t->script_cmd = NULL;
     t->script_lastcmd = NULL;
     t->script_cmd_reply = NULL;
+    t->terminator = 0;
 
     if (!evalasync) {
         t->eval_thread = server.eval_thread;
@@ -1202,6 +1238,7 @@ void evalGenericCommand(redisClient *c, int evalsha, int evalasync) {
         addEvalAsyncTask(t);
     } else {
         executeEvalTask(t);
+        releaseEvalTask(t);
     }
 }
 

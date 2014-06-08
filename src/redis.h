@@ -636,6 +636,7 @@ typedef struct evalTask {
     struct redisCommand *script_cmd; /* The next command that should be run */
     struct redisCommand *script_lastcmd; /* The last command executed */
     sds script_cmd_reply; /* The last command result */
+    int terminator; /* If true, worker should exit */
 } evalTask;
 
 struct redisServer {
@@ -862,7 +863,8 @@ struct redisServer {
                              execution. */
     int lua_kill;         /* Kill the script if true. */
 
-    list *evalasync_tasks;      /* The list of EVALASYNC tasks to be executed */
+    list *evalasync_executors;      /* The list of EVALASYNC workers */
+    list *evalasync_tasks;          /* The list of EVALASYNC tasks to be executed */
     pthread_mutex_t evalasync_queue_mutex;
     pthread_cond_t evalasync_queue_cond;
 
