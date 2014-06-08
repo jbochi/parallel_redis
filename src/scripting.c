@@ -1132,7 +1132,7 @@ evalThread *createEvalThread() {
 void releaseEvalThread(evalThread *th) {
     lua_close(th->lua);
     if (th->lua_client) {
-        freeClientAsync(th->lua_client);
+        // freeClientAsync(th->lua_client);
     }
     zfree(th);
 }
