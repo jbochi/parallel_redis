@@ -1359,7 +1359,7 @@ void scriptCommand(redisClient *c) {
         sha1hex(funcname+2,c->argv[2]->ptr,sdslen(c->argv[2]->ptr));
         sha = sdsnewlen(funcname+2,40);
         if (dictFind(server.lua_scripts,sha) == NULL) {
-            if (luaCreateFunction(c,NULL,funcname,c->argv[2])
+            if (luaCreateFunction(c,server.eval_thread->lua,funcname,c->argv[2])
                     == REDIS_ERR) {
                 sdsfree(sha);
                 return;
