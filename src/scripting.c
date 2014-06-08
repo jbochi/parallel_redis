@@ -307,7 +307,7 @@ int luaRedisGenericCommand(lua_State *lua, int raise_error) {
     if (c == NULL) {
         /* Create a fake client if this is the first command being executed */
         c = createClient(-1);
-        c->flags |= REDIS_LUA_CLIENT | REDIS_CLOSE_ASAP;
+        c->flags |= REDIS_LUA_CLIENT;
 
         t->eval_thread->lua_client = c;
     }
@@ -1130,10 +1130,6 @@ evalThread *createEvalThread() {
 }
 
 void releaseEvalThread(evalThread *th) {
-    if (th->lua_client) {
-        // TODO: Is this needed?
-        //freeClient(th->lua_client);
-    }
     lua_close(th->lua);
     zfree(th);
 }
