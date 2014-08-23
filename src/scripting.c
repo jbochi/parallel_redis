@@ -1127,7 +1127,17 @@ evalThread *createEvalThread() {
 void releaseEvalThread(evalThread *th) {
     lua_close(th->lua);
     if (th->lua_client) {
-        // freeClientAsync(th->lua_client);
+        // freeClientAsync(th->lua_client); crashing the server
+        // cleaning client manually;
+        redisClient *c = th->lua_client;
+        sdsfree(c->querybuf);
+        c->querybuf = NULL;
+        dictRelease(c->bpop.keys);
+        dictRelease(c->pubsub_channels);
+        listRelease(c->watched_keys);
+        listRelease(c->pubsub_patterns);
+        listRelease(c->reply);
+        zfree(c);
     }
     zfree(th);
 }
