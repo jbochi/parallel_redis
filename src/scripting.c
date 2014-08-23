@@ -379,7 +379,7 @@ int luaRedisGenericCommand(lua_State *lua, int raise_error) {
             goto cleanup;
         } else if (server.masterhost && server.repl_slave_ro &&
                    !server.loading &&
-                   !(server.lua_caller->flags & REDIS_MASTER))
+                   !(t->caller->flags & REDIS_MASTER))
         {
             luaPushError(lua, shared.roslaveerr->ptr);
             goto cleanup;
