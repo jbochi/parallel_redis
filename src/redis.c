@@ -1948,12 +1948,13 @@ void forceCommandPropagation(redisClient *c, int flags) {
 
 /* Call() is the core of Redis execution of a command */
 void call(redisClient *c, int flags) {
-    if (!(c->flags & REDIS_LUA_CLIENT)) {
-      pthread_mutex_lock(&server.call_mutex);
-    }
-
+    int should_lock = !server.loading &&
+                      !(c->flags & REDIS_LUA_CLIENT) &&
+                      !(c->flags & REDIS_MULTI);
     long long dirty, start, duration;
     int client_old_flags = c->flags;
+
+    if (should_lock) pthread_mutex_lock(&server.call_mutex);
 
     /* Sent the command to clients in MONITOR mode, only if the commands are
      * not generated from reading an AOF. */
@@ -2028,9 +2029,7 @@ void call(redisClient *c, int flags) {
     }
     server.stat_numcommands++;
 
-    if (!(c->flags & REDIS_LUA_CLIENT)) {
-      pthread_mutex_unlock(&server.call_mutex);
-    }
+    if (should_lock) pthread_mutex_unlock(&server.call_mutex);
 }
 
 /* If this function gets called we already read a whole
