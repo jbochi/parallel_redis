@@ -871,9 +871,10 @@ int luaCreateFunction(redisClient *c, lua_State *lua, char *funcname, robj *body
      * so that we can replicate / write in the AOF all the
      * EVALSHA commands as EVAL using the original script. */
     {
-        // TODO: FIX ME. Should Acquire lock to access dict.
         sds hash = sdsnewlen(funcname+2,40);
+        pthread_mutex_lock(&server.lua_scripts_mutex);
         int retval = dictAdd(server.lua_scripts,hash,body);
+        pthread_mutex_unlock(&server.lua_scripts_mutex);
         if (retval == DICT_OK) {
             /* The script can already be in the dict
              * if it was defined in another Lua State. */
@@ -1041,9 +1042,10 @@ void executeEvalTask(evalTask *t) {
         if (!evalsha) {
             script = t->argv[1];
         } else {
-            // TODO: FIX ME. Should Acquire lock to access dict.
             sds hash = sdsnew(funcname + 2);
+            pthread_mutex_lock(&server.lua_scripts_mutex);
             script = dictFetchValue(server.lua_scripts,hash);
+            pthread_mutex_unlock(&server.lua_scripts_mutex);
             sdsfree(hash);
             /* If script does not exist we can just return an error. */
             if (!script) {
@@ -1091,8 +1093,9 @@ void executeEvalTask(evalTask *t) {
             /* This script is not in our script cache, replicate it as
              * EVAL, then add it into the script cache, as from now on
              * slaves and AOF know about it. */
-            // TODO: FIX ME. Should Acquire lock to access dict.
+            pthread_mutex_lock(&server.lua_scripts_mutex);
             robj *script = dictFetchValue(server.lua_scripts,t->argv[1]->ptr);
+            pthread_mutex_unlock(&server.lua_scripts_mutex);
 
             replicationScriptCacheAdd(t->argv[1]->ptr);
             redisAssertWithInfo(c,NULL,script != NULL);
@@ -1174,6 +1177,7 @@ void scriptingInit(void) {
     /* Initialize a dictionary we use to map SHAs to scripts.
      * This is useful for replication, as we need to replicate EVALSHA
      * as EVAL, so we need to remember the associated script. */
+    pthread_mutex_init(&server.lua_scripts_mutex, NULL);
     server.lua_scripts = dictCreate(&shaScriptObjectDictType,NULL);
 
     server.eval_thread = createEvalThread();
@@ -1224,6 +1228,7 @@ void scriptingRelease(void) {
     // Release server globals
     pthread_mutex_destroy(&server.evalasync_queue_mutex);
     pthread_cond_destroy(&server.evalasync_queue_cond);
+    pthread_mutex_destroy(&server.lua_scripts_mutex);
     dictRelease(server.lua_scripts);
     releaseEvalThread(server.eval_thread);
 }
@@ -1361,20 +1366,27 @@ void scriptCommand(redisClient *c) {
 
         addReplyMultiBulkLen(c, c->argc-2);
         for (j = 2; j < c->argc; j++) {
+            pthread_mutex_lock(&server.lua_scripts_mutex);
             if (dictFind(server.lua_scripts,c->argv[j]->ptr))
                 addReply(c,shared.cone);
             else
                 addReply(c,shared.czero);
+            pthread_mutex_unlock(&server.lua_scripts_mutex);
         }
     } else if (c->argc == 3 && !strcasecmp(c->argv[1]->ptr,"load")) {
         char funcname[43];
+        int script_exists;
         sds sha;
 
         funcname[0] = 'f';
         funcname[1] = '_';
         sha1hex(funcname+2,c->argv[2]->ptr,sdslen(c->argv[2]->ptr));
         sha = sdsnewlen(funcname+2,40);
-        if (dictFind(server.lua_scripts,sha) == NULL) {
+
+        pthread_mutex_lock(&server.lua_scripts_mutex);
+        script_exists = dictFind(server.lua_scripts,sha) == NULL;
+        pthread_mutex_unlock(&server.lua_scripts_mutex);
+        if (script_exists) {
             if (luaCreateFunction(c,server.eval_thread->lua,funcname,c->argv[2])
                     == REDIS_ERR) {
                 sdsfree(sha);

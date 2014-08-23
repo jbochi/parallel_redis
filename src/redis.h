@@ -866,6 +866,7 @@ struct redisServer {
     evalThread *eval_thread;
     list *evalasync_executors;      /* The list of EVALASYNC workers */
     list *evalasync_tasks;          /* The list of EVALASYNC tasks to be executed */
+    pthread_mutex_t lua_scripts_mutex;
     pthread_mutex_t evalasync_queue_mutex;
     pthread_cond_t evalasync_queue_cond;
 
