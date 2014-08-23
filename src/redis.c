@@ -1948,6 +1948,10 @@ void forceCommandPropagation(redisClient *c, int flags) {
 
 /* Call() is the core of Redis execution of a command */
 void call(redisClient *c, int flags) {
+    if (!(c->flags & REDIS_LUA_CLIENT)) {
+      pthread_mutex_lock(&server.call_mutex);
+    }
+
     long long dirty, start, duration;
     int client_old_flags = c->flags;
 
@@ -2023,6 +2027,10 @@ void call(redisClient *c, int flags) {
         redisOpArrayFree(&server.also_propagate);
     }
     server.stat_numcommands++;
+
+    if (!(c->flags & REDIS_LUA_CLIENT)) {
+      pthread_mutex_unlock(&server.call_mutex);
+    }
 }
 
 /* If this function gets called we already read a whole

@@ -886,23 +886,6 @@ int luaCreateFunction(redisClient *c, lua_State *lua, char *funcname, robj *body
     return REDIS_OK;
 }
 
-/* A file event callback that executes the pending lua command inside the
- * event loop before signaling the Lua thread that it can resume */
-void luaExecAndResumeThread(aeEventLoop *el, int fd, void *clientData, int mask) {
-    evalTask *t = (evalTask *) clientData;
-    evalThread *th = t->eval_thread;
-
-    pthread_mutex_lock(&th->lua_yield_mutex);
-    if (t->script_cmd) {
-        if (t->script_cmd->flags & REDIS_CMD_WRITE) {
-            t->script_cmd_reply = luaRedisExecCommand(th->lua_thread, 1);
-        }
-    }
-    aeDeleteFileEvent(el, fd, mask);
-    pthread_cond_signal(&th->lua_yield_cond);
-    pthread_mutex_unlock(&th->lua_yield_mutex);
-}
-
 /* Resumes a lua thread and runs it until completion, sending the reply to client. */
 void luaCallAndReply(evalTask *t) {
     int evalasync = t->evalasync;
@@ -930,13 +913,9 @@ void luaCallAndReply(evalTask *t) {
 
     while (status == LUA_YIELD) {
         if (evalasync) {
-            /* If the Lua script yields, we create a time event to run any
-             * pending Redis command inside the event loop before we
-             * resume the script. */
-            pthread_mutex_lock(&th->lua_yield_mutex);
-            aeCreateFileEvent(server.el,c->fd,AE_WRITABLE,luaExecAndResumeThread,t);
-            pthread_cond_wait(&th->lua_yield_cond, &th->lua_yield_mutex);
-            pthread_mutex_unlock(&th->lua_yield_mutex);
+            pthread_mutex_lock(&server.call_mutex);
+            t->script_cmd_reply = luaRedisExecCommand(th->lua_thread, 1);
+            pthread_mutex_unlock(&server.call_mutex);
         }
         status = lua_resume(lua,NULL,0);
     }
@@ -1154,8 +1133,6 @@ void releaseEvalThread(evalThread *th) {
 
 evalThread *createEvalAsyncExecutor() {
     evalThread *th = createEvalThread();
-    pthread_mutex_init(&th->lua_yield_mutex, NULL);
-    pthread_cond_init(&th->lua_yield_cond, NULL);
     pthread_create(&th->thread, NULL, evalAsyncExecutor, (void *) th);
     return th;
 }
@@ -1177,6 +1154,7 @@ void scriptingInit(void) {
     /* Initialize a dictionary we use to map SHAs to scripts.
      * This is useful for replication, as we need to replicate EVALSHA
      * as EVAL, so we need to remember the associated script. */
+    pthread_mutex_init(&server.call_mutex, NULL);
     pthread_mutex_init(&server.lua_scripts_mutex, NULL);
     server.lua_scripts = dictCreate(&shaScriptObjectDictType,NULL);
 
@@ -1214,8 +1192,6 @@ void scriptingRelease(void) {
         evalThread *th = listNodeValue(node);
         // TODO: Fix deadlock when async task tries to call redis.
         pthread_join(th->thread, retval);
-        pthread_mutex_destroy(&th->lua_yield_mutex);
-        pthread_cond_destroy(&th->lua_yield_cond);
         releaseEvalThread(th);
     }
     listReleaseIterator(iter);
@@ -1228,6 +1204,7 @@ void scriptingRelease(void) {
     // Release server globals
     pthread_mutex_destroy(&server.evalasync_queue_mutex);
     pthread_cond_destroy(&server.evalasync_queue_cond);
+    pthread_mutex_destroy(&server.call_mutex);
     pthread_mutex_destroy(&server.lua_scripts_mutex);
     dictRelease(server.lua_scripts);
     releaseEvalThread(server.eval_thread);
