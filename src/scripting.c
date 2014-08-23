@@ -1160,8 +1160,8 @@ evalThread *createEvalAsyncExecutor() {
 void addEvalAsyncTask(evalTask *t) {
     pthread_mutex_lock(&server.evalasync_queue_mutex);
     listAddNodeTail(server.evalasync_tasks,t);
-    pthread_mutex_unlock(&server.evalasync_queue_mutex);
     pthread_cond_signal(&server.evalasync_queue_cond);
+    pthread_mutex_unlock(&server.evalasync_queue_mutex);
 }
 
 /* Initialize the scripting environment.
