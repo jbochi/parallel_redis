@@ -612,12 +612,20 @@ typedef struct redisOpArray {
  *----------------------------------------------------------------------------*/
 
 struct clusterState;
+struct evalTask;
 
 typedef struct evalThread {
     lua_State *lua; /* The Lua interpreter */
+    struct evalTask *current_task;
+    pthread_t thread;
+} evalThread;
+
+typedef struct evalTask {
+    evalThread *eval_thread;
+    redisClient *caller; /* The redis client that triggered the execution */
+
     lua_State *lua_thread;     /* The lua thread where async scripts are run */
     struct redisClient *lua_client;   /* The "fake client" to query Redis from Lua */
-    pthread_t thread;
 
     // Current script variables:
     mstime_t lua_time_start;  /* Start time of script, milliseconds time */
@@ -629,11 +637,7 @@ typedef struct evalThread {
                              execution. */
     int lua_kill;         /* Kill the script if true. */
 
-} evalThread;
 
-typedef struct evalTask {
-    evalThread *eval_thread;
-    redisClient *caller; /* The redis client that triggered the execution */
     int evalsha;
     int evalasync;
     int argc;

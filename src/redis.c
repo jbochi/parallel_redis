@@ -2203,7 +2203,8 @@ int processCommand(redisClient *c) {
     }
 
     /* Lua script too slow? Only allow a limited number of commands. */
-    if (server.eval_thread->lua_timedout &&
+    if (server.eval_thread->current_task &&
+          server.eval_thread->current_task->lua_timedout &&
           c->cmd->proc != authCommand &&
           c->cmd->proc != replconfCommand &&
         !(c->cmd->proc == shutdownCommand &&

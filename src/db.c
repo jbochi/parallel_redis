@@ -823,7 +823,8 @@ int expireIfNeeded(redisDb *db, robj *key) {
      * only the first time it is accessed and not in the middle of the
      * script execution, making propagation to slaves / AOF consistent.
      * See issue #1525 on Github for more information. */
-    now = server.eval_thread->lua_time_start ? server.eval_thread->lua_time_start : mstime();
+    now = server.eval_thread->current_task->lua_time_start ?
+      server.eval_thread->current_task->lua_time_start : mstime();
 
     /* If we are running in the context of a slave, return ASAP:
      * the slave key expiration is controlled by the master that will

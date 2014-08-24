@@ -213,7 +213,7 @@ sds luaRedisExecCommand(lua_State *lua, int async) {
     int propagateFlag = 0;
 
     evalTask *t = redisEvalTask(lua);
-    redisClient *c = t->eval_thread->lua_client;
+    redisClient *c = t->lua_client;
     sds reply;
 
     /* If this is an async execution, every command is propagated, instead
@@ -301,16 +301,15 @@ int luaRedisGenericCommand(lua_State *lua, int raise_error) {
     int j, argc = lua_gettop(lua);
     struct redisCommand *cmd;
     evalTask *t =  redisEvalTask(lua);
-    evalThread *th = t->eval_thread;
 
     robj **argv;
-    redisClient *c = th->lua_client;
+    redisClient *c = t->lua_client;
     if (c == NULL) {
         /* Create a fake client if this is the first command being executed */
         c = createClient(-1);
         c->flags |= REDIS_LUA_CLIENT;
 
-        th->lua_client = c;
+        t->lua_client = c;
     }
 
     /* Select the right DB in the context of the Lua client */
@@ -373,7 +372,7 @@ int luaRedisGenericCommand(lua_State *lua, int raise_error) {
      * command marked as non-deterministic was already called in the context
      * of this script. */
     if (cmd->flags & REDIS_CMD_WRITE) {
-        if (th->lua_random_dirty) {
+        if (t->lua_random_dirty) {
             luaPushError(lua,
                 "Write commands not allowed after non deterministic commands");
             goto cleanup;
@@ -396,7 +395,7 @@ int luaRedisGenericCommand(lua_State *lua, int raise_error) {
      * could enlarge the memory usage are not allowed, but only if this is the
      * first write in the context of this script, otherwise we can't stop
      * in the middle. */
-    if (server.maxmemory && th->lua_write_dirty == 0 &&
+    if (server.maxmemory && t->lua_write_dirty == 0 &&
         (cmd->flags & REDIS_CMD_DENYOOM))
     {
         if (freeMemoryIfNeeded() == REDIS_ERR) {
@@ -405,8 +404,8 @@ int luaRedisGenericCommand(lua_State *lua, int raise_error) {
         }
     }
 
-    if (cmd->flags & REDIS_CMD_RANDOM) th->lua_random_dirty = 1;
-    if (cmd->flags & REDIS_CMD_WRITE) th->lua_write_dirty = 1;
+    if (cmd->flags & REDIS_CMD_RANDOM) t->lua_random_dirty = 1;
+    if (cmd->flags & REDIS_CMD_WRITE) t->lua_write_dirty = 1;
 
     /* Yield, allowing the lua thread to suspend if this is a async
        script until the command is executed inside the event loop. */
@@ -527,17 +526,16 @@ int luaLogCommand(lua_State *lua) {
 
 void luaMaskCountHook(lua_State *lua, lua_Debug *ar) {
     evalTask *t =  redisEvalTask(lua);
-    evalThread *th = t->eval_thread;
 
     long long elapsed;
     REDIS_NOTUSED(ar);
     REDIS_NOTUSED(lua);
 
-    elapsed = mstime() - th->lua_time_start;
-    if (elapsed >= server.lua_time_limit && th->lua_timedout == 0) {
+    elapsed = mstime() - t->lua_time_start;
+    if (elapsed >= server.lua_time_limit && t->lua_timedout == 0) {
         redisLog(REDIS_WARNING,"Lua slow script detected: still in execution after %lld milliseconds. You can try killing the script using the SCRIPT KILL command.",elapsed);
         pthread_mutex_unlock(&server.call_mutex);
-        th->lua_timedout = 1;
+        t->lua_timedout = 1;
         /* Once the script timeouts we reenter the event loop to permit others
          * to call SCRIPT KILL or SHUTDOWN NOSAVE if needed. For this reason
          * we need to mask the client executing the script from the event loop.
@@ -545,9 +543,9 @@ void luaMaskCountHook(lua_State *lua, lua_Debug *ar) {
          * here when the EVAL command will return. */
          aeDeleteFileEvent(server.el, redisEvalTask(lua)->caller->fd, AE_READABLE);
     }
-    if (th->lua_timedout)
+    if (t->lua_timedout)
         aeProcessEvents(server.el, AE_FILE_EVENTS|AE_DONT_WAIT);
-    if (th->lua_kill) {
+    if (t->lua_kill) {
         redisLog(REDIS_WARNING,"Lua script killed by user with SCRIPT KILL.");
         lua_pushstring(lua,"Script killed by user with SCRIPT KILL...");
         lua_error(lua);
@@ -892,15 +890,15 @@ void luaCallAndReply(evalTask *t) {
     int evalasync = t->evalasync;
     redisClient *c = t->caller;
     evalThread *th = t->eval_thread;
-    lua_State *lua = th->lua_thread;
+    lua_State *lua = t->lua_thread;
     int delhook = 0, status;
 
     /* Set a hook in order to be able to stop the script execution if it
      * is running for too much time.
      * We set the hook only if the time limit is enabled as the hook will
      * make the Lua script execution slower. */
-    th->lua_time_start = mstime();
-    th->lua_kill = 0;
+    if (t->lua_time_start == 0) t->lua_time_start = mstime();
+    t->lua_kill = 0;
 
     if (!evalasync) {
         //TODO: handle timeouts in async execution
@@ -915,7 +913,7 @@ void luaCallAndReply(evalTask *t) {
     while (status == LUA_YIELD) {
         if (evalasync) {
             pthread_mutex_lock(&server.call_mutex);
-            t->script_cmd_reply = luaRedisExecCommand(th->lua_thread, 1);
+            t->script_cmd_reply = luaRedisExecCommand(t->lua_thread, 1);
             pthread_mutex_unlock(&server.call_mutex);
         }
         status = lua_resume(lua,NULL,0);
@@ -923,16 +921,16 @@ void luaCallAndReply(evalTask *t) {
 
     /* Perform some cleanup that we need to do both on error and success. */
     if (delhook) lua_sethook(lua,luaMaskCountHook,0,0); /* Disable hook */
-    if (!evalasync && th->lua_timedout) {
-        th->lua_timedout = 0;
+    if (!evalasync && t->lua_timedout) {
+        t->lua_timedout = 0;
         /* Restore the readable handler that was unregistered when the
          * script timeout was detected. */
         aeCreateFileEvent(server.el,c->fd,AE_READABLE,
                           readQueryFromClient,c);
     }
 
-    if (th->lua_client) {
-        selectDb(c,th->lua_client->db->id); /* set DB ID from Lua client */
+    if (t->lua_client) {
+        selectDb(c,t->lua_client->db->id); /* set DB ID from Lua client */
     }
 
     lua_gc(lua,LUA_GCSTEP,1);
@@ -953,9 +951,7 @@ void luaCallAndReply(evalTask *t) {
     /* Clean the lua thread */
     lua_settop(th->lua, 0);
     lua_gc(th->lua,LUA_GCSTEP,1);
-
-    /* Clean lua_time_start, so we know it has finished. */
-    th->lua_time_start = 0;
+    th->current_task = NULL;
 }
 
 void releaseEvalTask(evalTask *t) {
@@ -967,11 +963,25 @@ void releaseEvalTask(evalTask *t) {
         }
         zfree(t->argv);
     }
+    if (t->lua_client && !t->terminator) {
+        // freeClientAsync(t->lua_client); crashing the server
+        // cleaning client manually;
+        redisClient *c = t->lua_client;
+        sdsfree(c->querybuf);
+        c->querybuf = NULL;
+        dictRelease(c->bpop.keys);
+        dictRelease(c->pubsub_channels);
+        listRelease(c->watched_keys);
+        listRelease(c->pubsub_patterns);
+        listRelease(c->reply);
+        zfree(c);
+    }
     zfree(t);
 }
 
 void executeEvalTask(evalTask *t) {
     evalThread *th = t->eval_thread;
+    th->current_task = t;
     int evalsha = t->evalsha;
     redisClient *c = t->caller;
     lua_State *lua;
@@ -993,8 +1003,8 @@ void executeEvalTask(evalTask *t) {
      * Thanks to this flag we'll raise an error every time a write command
      * is called after a random command was used. */
 
-    th->lua_random_dirty = 0;
-    th->lua_write_dirty = 0;
+    t->lua_random_dirty = 0;
+    t->lua_write_dirty = 0;
 
     /* We obtain the script SHA1, then check if this function is already
      * defined into the Lua state */
@@ -1043,7 +1053,7 @@ void executeEvalTask(evalTask *t) {
 
     /* Start a new thread and push the function into the stack */
     lua_thread = lua_newthread(lua);
-    t->eval_thread->lua_thread = lua_thread;
+    t->lua_thread = lua_thread;
     lua_getglobal(lua_thread, funcname);
     redisAssert(!lua_isnil(lua,-1));
 
@@ -1143,31 +1153,11 @@ static void *evalAsyncExecutor(void * threadarg) {
 evalThread *createEvalThread() {
     evalThread *th = zmalloc(sizeof(struct evalThread));
     th->lua = luaStateInit();
-    th->lua_client = NULL;
-    th->lua_time_start = 0;
-    th->lua_write_dirty = 0;
-    th->lua_random_dirty = 0;
-    th->lua_timedout = 0;
-    th->lua_kill = 0;
-
     return th;
 }
 
 void releaseEvalThread(evalThread *th) {
     lua_close(th->lua);
-    if (th->lua_client) {
-        // freeClientAsync(th->lua_client); crashing the server
-        // cleaning client manually;
-        redisClient *c = th->lua_client;
-        sdsfree(c->querybuf);
-        c->querybuf = NULL;
-        dictRelease(c->bpop.keys);
-        dictRelease(c->pubsub_channels);
-        listRelease(c->watched_keys);
-        listRelease(c->pubsub_patterns);
-        listRelease(c->reply);
-        zfree(c);
-    }
     zfree(th);
 }
 
@@ -1270,6 +1260,12 @@ void evalGenericCommand(redisClient *c, int evalsha, int evalasync) {
     }
 
     evalTask *t = zmalloc(sizeof(struct evalTask));
+    t->lua_client = NULL;
+    t->lua_time_start = 0;
+    t->lua_write_dirty = 0;
+    t->lua_random_dirty = 0;
+    t->lua_timedout = 0;
+    t->lua_kill = 0;
 
     t->caller = c;
     t->evalsha = evalsha;
@@ -1417,12 +1413,12 @@ void scriptCommand(redisClient *c) {
         sdsfree(sha);
         forceCommandPropagation(c,REDIS_PROPAGATE_REPL|REDIS_PROPAGATE_AOF);
     } else if (c->argc == 2 && !strcasecmp(c->argv[1]->ptr,"kill")) {
-        if (server.eval_thread->lua_time_start == 0) {
+        if (server.eval_thread->current_task == NULL) {
             addReplySds(c,sdsnew("-NOTBUSY No scripts in execution right now.\r\n"));
-        } else if (server.eval_thread->lua_write_dirty) {
+        } else if (server.eval_thread->current_task->lua_write_dirty) {
             addReplySds(c,sdsnew("-UNKILLABLE Sorry the script already executed write commands against the dataset. You can either wait the script termination or kill the server in a hard way using the SHUTDOWN NOSAVE command.\r\n"));
         } else {
-            server.eval_thread->lua_kill = 1;
+            server.eval_thread->current_task->lua_kill = 1;
             addReply(c,shared.ok);
         }
     } else {
