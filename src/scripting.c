@@ -1131,27 +1131,81 @@ static void *evalAsyncExecutor(void * threadarg) {
         listDelNode(server.evalasync_tasks, first);
         pthread_mutex_unlock(&server.evalasync_queue_mutex);
 
-        t->eval_thread = th;
         if (t->terminator) {
             releaseEvalTask(t);
             pthread_exit(NULL);
+            releaseEvalTask(t);
             break;
         }
-        executeEvalTask((evalTask *) t);
-        releaseEvalTask(t);
+
+        if (t->eval_thread == NULL) {
+          // execution has not started yet
+          t->eval_thread = th;
+          status = executeEvalTask(t);
+        } else if (t->eval_thread == th) {
+          // execution has yield
+          pthread_mutex_lock(&server.call_mutex);
+          t->script_cmd_reply = luaRedisExecCommand(t->lua_thread, 1);
+          pthread_mutex_unlock(&server.call_mutex);
+          status = luaCallAndReply(t);
+#ifdef DEBUG_TASK_QUEUE
+          pthread_mutex_lock(&server.evalasync_queue_mutex);
+          tasksBlocked--;
+          debugTasks();
+          pthread_mutex_unlock(&server.evalasync_queue_mutex);
+#endif
+
+        } else {
+          // this is not mine!
+
+#ifdef DEBUG_TASK_QUEUE
+          pthread_mutex_lock(&server.evalasync_queue_mutex);
+          tasksAdded--;
+          tasksExecuting--;
+          debugTasks();
+          pthread_mutex_unlock(&server.evalasync_queue_mutex);
+#endif
+
+          redisLog(REDIS_WARNING, "Not mine! %p, %p", (void *) t->eval_thread, (void *) th);
+          addEvalAsyncTask(t);
+          continue;
+        }
 
 #ifdef DEBUG_TASK_QUEUE
         pthread_mutex_lock(&server.evalasync_queue_mutex);
         tasksExecuting--;
-        tasksExecuted++;
         debugTasks();
         pthread_mutex_unlock(&server.evalasync_queue_mutex);
 #endif
+
+
+        if (status == LUA_YIELD) {
+          // server is busy
+          addEvalAsyncTask(t);
+#ifdef DEBUG_TASK_QUEUE
+          pthread_mutex_lock(&server.evalasync_queue_mutex);
+          tasksBlocked++;
+          tasksAdded--;
+          debugTasks();
+          pthread_mutex_unlock(&server.evalasync_queue_mutex);
+#endif
+        } else {
+          releaseEvalTask(t);
+#ifdef DEBUG_TASK_QUEUE
+          pthread_mutex_lock(&server.evalasync_queue_mutex);
+          tasksExecuted++;
+          debugTasks();
+          pthread_mutex_unlock(&server.evalasync_queue_mutex);
+#endif
+        }
+
+
     }
 }
 
 evalThread *createEvalThread() {
     evalThread *th = zmalloc(sizeof(struct evalThread));
+    th->current_task = NULL;
     th->lua = luaStateInit();
     return th;
 }
@@ -1241,6 +1295,7 @@ void scriptingRelease(void) {
     pthread_mutex_destroy(&server.lua_scripts_mutex);
     dictRelease(server.lua_scripts);
     releaseEvalThread(server.eval_thread);
+    server.eval_thread = NULL;
 }
 
 void scriptingReset(void) {
