@@ -1087,6 +1087,23 @@ void executeEvalTask(evalTask *t) {
     }
 }
 
+//#define DEBUG_TASK_QUEUE
+
+#ifdef DEBUG_TASK_QUEUE
+  static int tasksAdded = 0;
+  static int tasksExecuted = 0;
+  static int tasksExecuting = 0;
+
+  void debugTasks() {
+    redisLog(REDIS_WARNING,"Tasks added: %d; Tasks executed: %d; Tasks executing: %d; Pending tasks: %ld",
+      tasksAdded,
+      tasksExecuted,
+      tasksExecuting,
+      listLength(server.evalasync_tasks)
+    );
+  }
+#endif
+
 static void *evalAsyncExecutor(void * threadarg) {
     evalThread *th = (evalThread *) threadarg;
 
@@ -1095,6 +1112,10 @@ static void *evalAsyncExecutor(void * threadarg) {
         while (listLength(server.evalasync_tasks) == 0) {
             pthread_cond_wait(&server.evalasync_queue_cond, &server.evalasync_queue_mutex);
         }
+#ifdef DEBUG_TASK_QUEUE
+        tasksExecuting++;
+        debugTasks();
+#endif
         listNode *first = listFirst(server.evalasync_tasks);
         evalTask *t = first->value;
         listDelNode(server.evalasync_tasks, first);
@@ -1108,6 +1129,14 @@ static void *evalAsyncExecutor(void * threadarg) {
         }
         executeEvalTask((evalTask *) t);
         releaseEvalTask(t);
+
+#ifdef DEBUG_TASK_QUEUE
+        pthread_mutex_lock(&server.evalasync_queue_mutex);
+        tasksExecuting--;
+        tasksExecuted++;
+        debugTasks();
+        pthread_mutex_unlock(&server.evalasync_queue_mutex);
+#endif
     }
 }
 
@@ -1150,6 +1179,9 @@ evalThread *createEvalAsyncExecutor() {
 
 void addEvalAsyncTask(evalTask *t) {
     pthread_mutex_lock(&server.evalasync_queue_mutex);
+#ifdef DEBUG_TASK_QUEUE
+    tasksAdded++; debugTasks();
+#endif
     listAddNodeTail(server.evalasync_tasks,t);
     pthread_cond_signal(&server.evalasync_queue_cond);
     pthread_mutex_unlock(&server.evalasync_queue_mutex);
