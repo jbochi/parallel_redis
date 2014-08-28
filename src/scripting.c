@@ -38,7 +38,7 @@
 #include <ctype.h>
 #include <math.h>
 
-#define NUM_LUA_WORKERS 4
+#define NUM_LUA_WORKERS 3
 
 char *redisProtocolToLuaType_Int(lua_State *lua, char *reply);
 char *redisProtocolToLuaType_Bulk(lua_State *lua, char *reply);
@@ -886,12 +886,13 @@ int luaCreateFunction(redisClient *c, lua_State *lua, char *funcname, robj *body
 }
 
 /* Resumes a lua thread and runs it until completion, sending the reply to client. */
-void luaCallAndReply(evalTask *t) {
+int luaCallAndReply(evalTask *t) {
     int evalasync = t->evalasync;
     redisClient *c = t->caller;
     evalThread *th = t->eval_thread;
     lua_State *lua = t->lua_thread;
-    int delhook = 0, status;
+    int delhook = 0;
+    int status;
 
     /* Set a hook in order to be able to stop the script execution if it
      * is running for too much time.
@@ -912,9 +913,12 @@ void luaCallAndReply(evalTask *t) {
 
     while (status == LUA_YIELD) {
         if (evalasync) {
-            pthread_mutex_lock(&server.call_mutex);
-            t->script_cmd_reply = luaRedisExecCommand(t->lua_thread, 1);
-            pthread_mutex_unlock(&server.call_mutex);
+            if (pthread_mutex_trylock(&server.call_mutex) == 0) {
+              t->script_cmd_reply = luaRedisExecCommand(t->lua_thread, 1);
+              pthread_mutex_unlock(&server.call_mutex);
+            } else {
+              return status;
+            }
         }
         status = lua_resume(lua,NULL,0);
     }
@@ -949,13 +953,16 @@ void luaCallAndReply(evalTask *t) {
         luaReplyToRedisReply(c,lua); /* Convert and consume the reply. */
     }
     /* Clean the lua thread */
-    lua_settop(th->lua, 0);
-    lua_gc(th->lua,LUA_GCSTEP,1);
+    lua_settop(t->lua, 0);
+    lua_gc(t->lua,LUA_GCSTEP,1);
     th->current_task = NULL;
+
+    return status;
 }
 
 void releaseEvalTask(evalTask *t) {
     int i;
+    if (!t->terminator) lua_close(t->lua);
     if (t->evalasync && !t->terminator) {
         /* We must clean the args copied for eval async call. */
         for (i = 0; i < t->argc; i++) {
@@ -979,16 +986,17 @@ void releaseEvalTask(evalTask *t) {
     zfree(t);
 }
 
-void executeEvalTask(evalTask *t) {
+int executeEvalTask(evalTask *t) {
     evalThread *th = t->eval_thread;
     th->current_task = t;
     int evalsha = t->evalsha;
     redisClient *c = t->caller;
     lua_State *lua;
     lua_State *lua_thread;
+    int status;
 
     char funcname[43];
-    lua = t->eval_thread->lua;
+    lua = t->lua;
 
     /* We want the same PRNG sequence at every call so that our PRNG is
      * not affected by external state. */
@@ -1040,13 +1048,13 @@ void executeEvalTask(evalTask *t) {
             /* If script does not exist we can just return an error. */
             if (!script) {
                 addReply(c, shared.noscripterr);
-                return;
+                return LUA_OK;
             }
         }
         if (luaCreateFunction(c,lua,funcname,script) == REDIS_ERR) {
             /* The error is sent to the client by luaCreateFunction()
              * itself when it returns REDIS_ERR. */
-            return;
+            return LUA_OK;
         }
     }
     lua_pop(lua,1); /* remove the function or nil from the stack */
@@ -1066,7 +1074,7 @@ void executeEvalTask(evalTask *t) {
     lua_pushlightuserdata(lua_thread, (void *) t);
     lua_setfield(lua_thread, LUA_REGISTRYINDEX, "redisEvalTask");
 
-    luaCallAndReply(t);
+    status = luaCallAndReply(t);
 
     /* EVALSHA should be propagated to Slave and AOF file as full EVAL, unless
      * we are sure that the script was already in the context of all the
@@ -1095,26 +1103,40 @@ void executeEvalTask(evalTask *t) {
             forceCommandPropagation(c,REDIS_PROPAGATE_REPL|REDIS_PROPAGATE_AOF);
         }
     }
+    return status;
 }
 
-//#define DEBUG_TASK_QUEUE
+// #define DEBUG_TASK_QUEUE
 
 #ifdef DEBUG_TASK_QUEUE
   static int tasksAdded = 0;
   static int tasksExecuted = 0;
   static int tasksExecuting = 0;
+  static int tasksBlocked = 0;
 
   void debugTasks() {
-    redisLog(REDIS_WARNING,"Tasks added: %d; Tasks executed: %d; Tasks executing: %d; Pending tasks: %ld",
+    redisLog(REDIS_WARNING,"Tasks added: %d; Tasks executed: %d; Tasks executing: %d; Tasks blocked: %d; Pending tasks: %ld",
       tasksAdded,
       tasksExecuted,
       tasksExecuting,
+      tasksBlocked,
       listLength(server.evalasync_tasks)
     );
   }
 #endif
 
+void addEvalAsyncTask(evalTask *t) {
+    pthread_mutex_lock(&server.evalasync_queue_mutex);
+#ifdef DEBUG_TASK_QUEUE
+    tasksAdded++; debugTasks();
+#endif
+    listAddNodeTail(server.evalasync_tasks,t);
+    pthread_cond_signal(&server.evalasync_queue_cond);
+    pthread_mutex_unlock(&server.evalasync_queue_mutex);
+}
+
 static void *evalAsyncExecutor(void * threadarg) {
+    int status;
     evalThread *th = (evalThread *) threadarg;
 
     while (1) {
@@ -1142,11 +1164,12 @@ static void *evalAsyncExecutor(void * threadarg) {
           // execution has not started yet
           t->eval_thread = th;
           status = executeEvalTask(t);
-        } else if (t->eval_thread == th) {
+        } else {
           // execution has yield
-          pthread_mutex_lock(&server.call_mutex);
+          redisAssert(pthread_mutex_lock(&server.call_mutex) == 0);
           t->script_cmd_reply = luaRedisExecCommand(t->lua_thread, 1);
           pthread_mutex_unlock(&server.call_mutex);
+
           status = luaCallAndReply(t);
 #ifdef DEBUG_TASK_QUEUE
           pthread_mutex_lock(&server.evalasync_queue_mutex);
@@ -1154,21 +1177,6 @@ static void *evalAsyncExecutor(void * threadarg) {
           debugTasks();
           pthread_mutex_unlock(&server.evalasync_queue_mutex);
 #endif
-
-        } else {
-          // this is not mine!
-
-#ifdef DEBUG_TASK_QUEUE
-          pthread_mutex_lock(&server.evalasync_queue_mutex);
-          tasksAdded--;
-          tasksExecuting--;
-          debugTasks();
-          pthread_mutex_unlock(&server.evalasync_queue_mutex);
-#endif
-
-          redisLog(REDIS_WARNING, "Not mine! %p, %p", (void *) t->eval_thread, (void *) th);
-          addEvalAsyncTask(t);
-          continue;
         }
 
 #ifdef DEBUG_TASK_QUEUE
@@ -1206,12 +1214,10 @@ static void *evalAsyncExecutor(void * threadarg) {
 evalThread *createEvalThread() {
     evalThread *th = zmalloc(sizeof(struct evalThread));
     th->current_task = NULL;
-    th->lua = luaStateInit();
     return th;
 }
 
 void releaseEvalThread(evalThread *th) {
-    lua_close(th->lua);
     zfree(th);
 }
 
@@ -1219,16 +1225,6 @@ evalThread *createEvalAsyncExecutor() {
     evalThread *th = createEvalThread();
     pthread_create(&th->thread, NULL, evalAsyncExecutor, (void *) th);
     return th;
-}
-
-void addEvalAsyncTask(evalTask *t) {
-    pthread_mutex_lock(&server.evalasync_queue_mutex);
-#ifdef DEBUG_TASK_QUEUE
-    tasksAdded++; debugTasks();
-#endif
-    listAddNodeTail(server.evalasync_tasks,t);
-    pthread_cond_signal(&server.evalasync_queue_cond);
-    pthread_mutex_unlock(&server.evalasync_queue_mutex);
 }
 
 /* Initialize the scripting environment.
@@ -1303,6 +1299,19 @@ void scriptingReset(void) {
     scriptingInit();
 }
 
+evalTask *createEvalTask() {
+    evalTask *t = zmalloc(sizeof(struct evalTask));
+    t->lua = luaStateInit();
+    t->lua_client = NULL;
+    t->lua_time_start = 0;
+    t->lua_write_dirty = 0;
+    t->lua_random_dirty = 0;
+    t->lua_timedout = 0;
+    t->lua_kill = 0;
+    t->terminator = 0;
+    return t;
+}
+
 void evalGenericCommand(redisClient *c, int evalsha, int evalasync) {
     long long numkeys;
 
@@ -1314,14 +1323,7 @@ void evalGenericCommand(redisClient *c, int evalsha, int evalasync) {
         return;
     }
 
-    evalTask *t = zmalloc(sizeof(struct evalTask));
-    t->lua_client = NULL;
-    t->lua_time_start = 0;
-    t->lua_write_dirty = 0;
-    t->lua_random_dirty = 0;
-    t->lua_timedout = 0;
-    t->lua_kill = 0;
-
+    evalTask *t = createEvalTask();
     t->caller = c;
     t->evalsha = evalsha;
     t->evalasync = evalasync;
@@ -1457,12 +1459,15 @@ void scriptCommand(redisClient *c) {
         pthread_mutex_lock(&server.lua_scripts_mutex);
         script_exists = dictFind(server.lua_scripts,sha) == NULL;
         pthread_mutex_unlock(&server.lua_scripts_mutex);
-        if (script_exists) {
-            if (luaCreateFunction(c,server.eval_thread->lua,funcname,c->argv[2])
+        if (script_exists && server.eval_thread) {
+            if (server.eval_thread->current_task == NULL);
+            server.eval_thread->current_task = createEvalTask();
+            if (luaCreateFunction(c,server.eval_thread->current_task->lua,funcname,c->argv[2])
                     == REDIS_ERR) {
                 sdsfree(sha);
                 return;
             }
+            releaseEvalTask(server.eval_thread->current_task);
         }
         addReplyBulkCBuffer(c,funcname+2,40);
         sdsfree(sha);
