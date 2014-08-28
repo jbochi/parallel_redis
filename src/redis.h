@@ -615,12 +615,12 @@ struct clusterState;
 struct evalTask;
 
 typedef struct evalThread {
-    lua_State *lua; /* The Lua interpreter */
     struct evalTask *current_task;
     pthread_t thread;
 } evalThread;
 
 typedef struct evalTask {
+    lua_State *lua; /* The Lua interpreter */
     evalThread *eval_thread;
     redisClient *caller; /* The redis client that triggered the execution */
 
