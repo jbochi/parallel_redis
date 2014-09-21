@@ -93,6 +93,7 @@ static struct config {
     sds mb_delim;
     char prompt[128];
     char *eval;
+    int evalasync;
 } config;
 
 static void usage();
@@ -748,6 +749,9 @@ static int parseOptions(int argc, char **argv) {
             config.bigkeys = 1;
         } else if (!strcmp(argv[i],"--eval") && !lastarg) {
             config.eval = argv[++i];
+        } else if (!strcmp(argv[i],"--evalasync") && !lastarg) {
+          config.eval = argv[++i];
+          config.evalasync = 1;
         } else if (!strcmp(argv[i],"-c")) {
             config.cluster_mode = 1;
         } else if (!strcmp(argv[i],"-d") && !lastarg) {
@@ -825,6 +829,7 @@ static void usage() {
 "  --intrinsic-latency <sec> Run a test to measure intrinsic system latency.\n"
 "                     The test will run for the specified amount of seconds.\n"
 "  --eval <file>      Send an EVAL command using the Lua script at <file>.\n"
+"  --evalasync <file>      Send an EVALASYNC command using the Lua script at <file>.\n"
 "  --help             Output this help and exit.\n"
 "  --version          Output version and exit.\n"
 "\n"
@@ -988,7 +993,7 @@ static int evalMode(int argc, char **argv) {
 
     /* Create our argument vector */
     argv2 = zmalloc(sizeof(sds)*(argc+3));
-    argv2[0] = sdsnew("EVAL");
+    argv2[0] = sdsnew(config.evalasync ? "EVALASYNC" : "EVAL");
     argv2[1] = script;
     for (j = 0; j < argc; j++) {
         if (!got_comma && argv[j][0] == ',' && argv[j][1] == 0) {
@@ -1148,7 +1153,7 @@ static void getRDB(void) {
 
     while(payload) {
         ssize_t nread, nwritten;
-        
+
         nread = read(s,buf,(payload > sizeof(buf)) ? sizeof(buf) : payload);
         if (nread <= 0) {
             fprintf(stderr,"I/O Error reading RDB payload from socket\n");
@@ -1231,7 +1236,7 @@ static void pipeMode(void) {
                         errors++;
                     } else if (eof && reply->type == REDIS_REPLY_STRING &&
                                       reply->len == 20) {
-                        /* Check if this is the reply to our final ECHO 
+                        /* Check if this is the reply to our final ECHO
                          * command. If so everything was received
                          * from the server. */
                         if (memcmp(reply->str,magic,20) == 0) {
@@ -1252,7 +1257,7 @@ static void pipeMode(void) {
                 /* Transfer current buffer to server. */
                 if (obuf_len != 0) {
                     ssize_t nwritten = write(fd,obuf+obuf_pos,obuf_len);
-                    
+
                     if (nwritten == -1) {
                         if (errno != EAGAIN && errno != EINTR) {
                             fprintf(stderr, "Error writing to the server: %s\n",
@@ -1355,7 +1360,7 @@ static redisReply *sendScan(unsigned long long *it) {
     /* Validate our types are correct */
     assert(reply->element[0]->type == REDIS_REPLY_STRING);
     assert(reply->element[1]->type == REDIS_REPLY_ARRAY);
-    
+
     /* Update iterator */
     *it = atoi(reply->element[0]->str);
 
@@ -1367,7 +1372,7 @@ static int getDbSize(void) {
     int size;
 
     reply = redisCommand(context, "DBSIZE");
-    
+
     if(reply == NULL || reply->type != REDIS_REPLY_INTEGER) {
         fprintf(stderr, "Couldn't determine DBSIZE!\n");
         exit(1);
@@ -1420,13 +1425,13 @@ static void getKeyTypes(redisReply *keys, int *types) {
             exit(1);
         }
 
-        types[i] = toIntType(keys->element[i]->str, reply->str); 
+        types[i] = toIntType(keys->element[i]->str, reply->str);
         freeReplyObject(reply);
     }
 }
 
-static void getKeySizes(redisReply *keys, int *types, 
-                        unsigned long long *sizes) 
+static void getKeySizes(redisReply *keys, int *types,
+                        unsigned long long *sizes)
 {
     redisReply *reply;
     char *sizecmds[] = {"STRLEN","LLEN","SCARD","HLEN","ZCARD"};
@@ -1435,10 +1440,10 @@ static void getKeySizes(redisReply *keys, int *types,
     /* Pipeline size commands */
     for(i=0;i<keys->elements;i++) {
         /* Skip keys that were deleted */
-        if(types[i]==TYPE_NONE) 
+        if(types[i]==TYPE_NONE)
             continue;
 
-        redisAppendCommand(context, "%s %s", sizecmds[types[i]], 
+        redisAppendCommand(context, "%s %s", sizecmds[types[i]],
             keys->element[i]->str);
     }
 
@@ -1458,14 +1463,14 @@ static void getKeySizes(redisReply *keys, int *types,
         } else if(reply->type != REDIS_REPLY_INTEGER) {
             /* Theoretically the key could have been removed and
              * added as a different type between TYPE and SIZE */
-            fprintf(stderr, 
+            fprintf(stderr,
                 "Warning:  %s on '%s' failed (may have changed type)\n",
                  sizecmds[types[i]], keys->element[i]->str);
             sizes[i] = 0;
         } else {
             sizes[i] = reply->integer;
         }
-            
+
         freeReplyObject(reply);
     }
 }
@@ -1522,12 +1527,12 @@ static void findBigKeys(void) {
         /* Retreive types and then sizes */
         getKeyTypes(keys, types);
         getKeySizes(keys, types, sizes);
-        
+
         /* Now update our stats */
         for(i=0;i<keys->elements;i++) {
             if((type = types[i]) == TYPE_NONE)
                 continue;
-            
+
             totalsize[type] += sizes[i];
             counts[type]++;
             totlen += keys->element[i]->len;
@@ -1547,7 +1552,7 @@ static void findBigKeys(void) {
                 }
 
                 /* Keep track of the biggest size for this type */
-                biggest[type] = sizes[i];                
+                biggest[type] = sizes[i];
             }
 
             /* Update overall progress */
@@ -1560,7 +1565,7 @@ static void findBigKeys(void) {
         if(sampled && (sampled %100) == 0 && config.interval) {
             usleep(config.interval);
         }
-        
+
         freeReplyObject(reply);
     } while(it != 0);
 
@@ -1872,6 +1877,7 @@ int main(int argc, char **argv) {
     config.stdinarg = 0;
     config.auth = NULL;
     config.eval = NULL;
+    config.evalasync = 0;
     if (!isatty(fileno(stdout)) && (getenv("FAKETTY") == NULL))
         config.output = OUTPUT_RAW;
     else
