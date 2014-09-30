@@ -233,10 +233,25 @@ int pubsubPublishMessage(robj *channel, robj *message) {
         while ((ln = listNext(&li)) != NULL) {
             redisClient *c = ln->value;
 
-            addReply(c,shared.mbulkhdr[3]);
-            addReply(c,shared.messagebulk);
-            addReplyBulk(c,channel);
-            addReplyBulk(c,message);
+            if (c->flags & REDIS_LUA_PUBSUB_CLIENT) {
+                evalTask *t = createEvalTask();
+                t->caller = createClient(-1);
+                t->evalsha = 1;
+                t->evalasync = 1;
+                t->argc = 5;
+                t->argv = (robj **) zmalloc(sizeof(robj*)*t->argc);
+                t->argv[0] = createStringObject("EVALSHAASYNC",12);
+                t->argv[1] = createObject(REDIS_STRING,sdsdup(c->name->ptr));
+                t->argv[2] = createStringObject("0",1);
+                t->argv[3] = createObject(REDIS_STRING,sdsdup(channel->ptr));
+                t->argv[4] = createObject(REDIS_STRING,sdsdup(message->ptr));
+                addEvalAsyncTask(t);
+            } else {
+                addReply(c,shared.mbulkhdr[3]);
+                addReply(c,shared.messagebulk);
+                addReplyBulk(c,channel);
+                addReplyBulk(c,message);
+            }
             receivers++;
         }
     }
@@ -302,6 +317,20 @@ void punsubscribeCommand(redisClient *c) {
         for (j = 1; j < c->argc; j++)
             pubsubUnsubscribePattern(c,c->argv[j],1);
     }
+}
+
+void ssubscribeCommand(redisClient *c) {
+    int j;
+    robj *scriptSHA1 = c->argv[1];
+    redisClient *script_client = createClient(-1);
+    script_client->flags |= REDIS_LUA_PUBSUB_CLIENT;
+    script_client->name = scriptSHA1;
+    incrRefCount(scriptSHA1);
+
+    for (j = 2; j < c->argc; j++)
+        pubsubSubscribeChannel(script_client,c->argv[j]);
+
+    addReply(c,shared.ok);
 }
 
 void publishCommand(redisClient *c) {

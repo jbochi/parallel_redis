@@ -235,6 +235,7 @@
 #define REDIS_FORCE_REPL (1<<15)  /* Force replication of current cmd. */
 #define REDIS_PRE_PSYNC (1<<16)   /* Instance don't understand PSYNC. */
 #define REDIS_READONLY (1<<17)    /* Cluster client is in read-only state. */
+#define REDIS_LUA_PUBSUB_CLIENT (1<<18) /* This is a non connected client used by Lua PUB/SUB */
 
 /* Client block type (btype field in client structure)
  * if REDIS_BLOCKED flag is set. */
@@ -1328,6 +1329,8 @@ void sentinelIsRunning(void);
 
 /* Scripting */
 void scriptingInit(void);
+evalTask *createEvalTask();
+void addEvalAsyncTask(evalTask *t);
 
 /* Blocked clients */
 void processUnblockedClients(void);
@@ -1468,6 +1471,7 @@ void subscribeCommand(redisClient *c);
 void unsubscribeCommand(redisClient *c);
 void psubscribeCommand(redisClient *c);
 void punsubscribeCommand(redisClient *c);
+void ssubscribeCommand(redisClient *c);
 void publishCommand(redisClient *c);
 void pubsubCommand(redisClient *c);
 void watchCommand(redisClient *c);
