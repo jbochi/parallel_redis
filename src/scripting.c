@@ -1309,6 +1309,17 @@ evalTask *createEvalTask() {
     t->lua_timedout = 0;
     t->lua_kill = 0;
     t->terminator = 0;
+    t->lua_timedout = 0;
+    t->argc = 0;
+    t->numkeys = 0;
+    t->evalsha = 0;
+    t->evalasync = 0;
+    t->caller = NULL;
+    t->argv = NULL;
+    t->script_cmd = NULL;
+    t->script_lastcmd = NULL;
+    t->script_cmd_reply = NULL;
+    t->eval_thread = NULL;
     return t;
 }
 
@@ -1338,15 +1349,9 @@ void evalGenericCommand(redisClient *c, int evalsha, int evalasync) {
         t->argv = c->argv;
     }
     t->numkeys = numkeys;
-    t->script_cmd = NULL;
-    t->script_lastcmd = NULL;
-    t->script_cmd_reply = NULL;
-    t->terminator = 0;
 
     if (!evalasync) {
         t->eval_thread = server.eval_thread;
-    } else {
-        t->eval_thread = NULL;
     }
 
     if (evalasync) {
