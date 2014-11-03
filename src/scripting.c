@@ -1453,7 +1453,7 @@ void scriptCommand(redisClient *c) {
         }
     } else if (c->argc == 3 && !strcasecmp(c->argv[1]->ptr,"load")) {
         char funcname[43];
-        int script_exists;
+        int script_not_exists;
         sds sha;
 
         funcname[0] = 'f';
@@ -1462,17 +1462,16 @@ void scriptCommand(redisClient *c) {
         sha = sdsnewlen(funcname+2,40);
 
         pthread_mutex_lock(&server.lua_scripts_mutex);
-        script_exists = dictFind(server.lua_scripts,sha) == NULL;
+        script_not_exists = dictFind(server.lua_scripts,sha) == NULL;
         pthread_mutex_unlock(&server.lua_scripts_mutex);
-        if (script_exists && server.eval_thread) {
-            if (server.eval_thread->current_task == NULL);
-            server.eval_thread->current_task = createEvalTask();
-            if (luaCreateFunction(c,server.eval_thread->current_task->lua,funcname,c->argv[2])
+        if (script_not_exists) {
+            evalTask *tmp_task = createEvalTask();
+            if (luaCreateFunction(c,tmp_task->lua,funcname,c->argv[2])
                     == REDIS_ERR) {
                 sdsfree(sha);
                 return;
             }
-            releaseEvalTask(server.eval_thread->current_task);
+            releaseEvalTask(tmp_task);
         }
         addReplyBulkCBuffer(c,funcname+2,40);
         sdsfree(sha);
