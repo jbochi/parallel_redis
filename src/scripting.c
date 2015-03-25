@@ -1140,6 +1140,7 @@ static void *evalAsyncExecutor(void * threadarg) {
     evalThread *th = (evalThread *) threadarg;
 
     while (1) {
+        // Get the next task
         pthread_mutex_lock(&server.evalasync_queue_mutex);
         while (listLength(server.evalasync_tasks) == 0) {
             pthread_cond_wait(&server.evalasync_queue_cond, &server.evalasync_queue_mutex);
@@ -1154,12 +1155,14 @@ static void *evalAsyncExecutor(void * threadarg) {
         pthread_mutex_unlock(&server.evalasync_queue_mutex);
 
         if (t->terminator) {
+            // Shut the worker down
             releaseEvalTask(t);
             pthread_exit(NULL);
             releaseEvalTask(t);
             break;
         }
 
+        // Got a new task
         if (t->eval_thread == NULL) {
           // execution has not started yet
           t->eval_thread = th;
