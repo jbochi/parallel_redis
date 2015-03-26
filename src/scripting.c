@@ -733,6 +733,35 @@ lua_State *luaStateInit(void) {
     return lua;
 }
 
+// Lua State Pool
+
+#define MAX_LUA_STATES 100
+
+lua_State *luaStateGet(void) {
+  lua_State *lua;
+  pthread_mutex_lock(&server.lua_state_pool_mutex);
+  if (listLength(server.lua_state_pool) == 0) {
+    lua = luaStateInit();
+  } else {
+    listNode *first = listFirst(server.lua_state_pool);
+    lua = first->value;
+    listDelNode(server.lua_state_pool, first);
+  }
+  pthread_mutex_unlock(&server.lua_state_pool_mutex);
+  return lua;
+}
+
+void luaStateRelease(lua_State *lua) {
+  pthread_mutex_lock(&server.lua_state_pool_mutex);
+  if (listLength(server.lua_state_pool) < MAX_LUA_STATES) {
+    listAddNodeTail(server.lua_state_pool, lua);
+  } else {
+    lua_close(lua);
+  }
+  pthread_mutex_unlock(&server.lua_state_pool_mutex);
+}
+
+
 /* Perform the SHA1 of the input string. We use this both for hashing script
  * bodies in order to obtain the Lua function name, and in the implementation
  * of redis.sha1().
@@ -962,7 +991,7 @@ int luaCallAndReply(evalTask *t) {
 
 void releaseEvalTask(evalTask *t) {
     int i;
-    if (!t->terminator) lua_close(t->lua);
+    if (!t->terminator) luaStateRelease(t->lua);
     if (t->evalasync && !t->terminator) {
         /* We must clean the args copied for eval async call. */
         for (i = 0; i < t->argc; i++) {
@@ -1251,10 +1280,15 @@ void scriptingInit(void) {
     server.evalasync_tasks = listCreate();
     server.evalasync_executors = listCreate();
 
+    pthread_mutex_init(&server.lua_state_pool_mutex, NULL);
+    server.lua_state_pool = listCreate();
+
     for (i = 0; i < NUM_LUA_WORKERS; i++) {
         evalThread *th = createEvalAsyncExecutor();
         listAddNodeTail(server.evalasync_executors, th);
     }
+
+
 }
 
 /* Release resources related to Lua scripting.
@@ -1287,11 +1321,21 @@ void scriptingRelease(void) {
     redisAssert(listLength(server.evalasync_tasks) == 0);
     listRelease(server.evalasync_tasks);
 
+    // Release all lua states
+    iter = listGetIterator(server.lua_state_pool, AL_START_HEAD);
+    while ((node = listNext(iter)) != NULL) {
+      lua_State *lua = listNodeValue(node);
+      lua_close(lua);
+    }
+    listReleaseIterator(iter);
+    listRelease(server.lua_state_pool);
+
     // Release server globals
     pthread_mutex_destroy(&server.evalasync_queue_mutex);
     pthread_cond_destroy(&server.evalasync_queue_cond);
     pthread_mutex_destroy(&server.call_mutex);
     pthread_mutex_destroy(&server.lua_scripts_mutex);
+    pthread_mutex_destroy(&server.lua_state_pool_mutex);
     dictRelease(server.lua_scripts);
     releaseEvalThread(server.eval_thread);
     server.eval_thread = NULL;
@@ -1304,7 +1348,7 @@ void scriptingReset(void) {
 
 evalTask *createEvalTask() {
     evalTask *t = zmalloc(sizeof(struct evalTask));
-    t->lua = luaStateInit();
+    t->lua = luaStateGet();
     t->lua_client = NULL;
     t->lua_time_start = 0;
     t->lua_write_dirty = 0;
