@@ -96,8 +96,6 @@ redisClient *createClient(int fd) {
     c->bulklen = -1;
     c->sentlen = 0;
     c->flags = 0;
-
-
     c->authenticated = 0;
     c->replstate = REDIS_REPL_NONE;
     c->reploff = 0;
@@ -122,6 +120,7 @@ redisClient *createClient(int fd) {
     listSetFreeMethod(c->pubsub_patterns,decrRefCountVoid);
     listSetMatchMethod(c->pubsub_patterns,listMatchObjects);
 
+    pthread_mutex_init(&c->buffer_mutex, NULL);
     pthread_mutex_lock(&server.global_mutex);
     c->ctime = c->lastinteraction = server.unixtime;
     if (fd != -1) listAddNodeTail(server.clients,c);
@@ -179,6 +178,8 @@ robj *dupLastObjectIfNeeded(list *reply) {
  * -------------------------------------------------------------------------- */
 
 int _addReplyToBuffer(redisClient *c, char *s, size_t len) {
+
+    pthread_mutex_lock(&c->buffer_mutex);
     size_t available = sizeof(c->buf)-c->bufpos;
 
     if (c->flags & REDIS_CLOSE_AFTER_REPLY) return REDIS_OK;
@@ -192,6 +193,8 @@ int _addReplyToBuffer(redisClient *c, char *s, size_t len) {
 
     memcpy(c->buf+c->bufpos,s,len);
     c->bufpos+=len;
+    pthread_mutex_unlock(&c->buffer_mutex);
+
     return REDIS_OK;
 }
 
@@ -756,6 +759,9 @@ void freeClient(redisClient *c) {
         listDelNode(server.clients_to_close,ln);
     }
 
+
+    pthread_mutex_destroy(&c->buffer_mutex);
+
     /* Release other dynamically allocated client structure fields,
      * and finally release the client structure itself. */
     if (c->name) decrRefCount(c->name);
@@ -793,6 +799,7 @@ void sendReplyToClient(aeEventLoop *el, int fd, void *privdata, int mask) {
     REDIS_NOTUSED(el);
     REDIS_NOTUSED(mask);
 
+    pthread_mutex_lock(&c->buffer_mutex);
     while(c->bufpos > 0 || listLength(c->reply)) {
         if (c->bufpos > 0) {
             nwritten = write(fd,c->buf+c->sentlen,c->bufpos-c->sentlen);
@@ -847,6 +854,7 @@ void sendReplyToClient(aeEventLoop *el, int fd, void *privdata, int mask) {
         } else {
             redisLog(REDIS_VERBOSE,
                 "Error writing to client: %s", strerror(errno));
+            pthread_mutex_unlock(&c->buffer_mutex);
             freeClient(c);
             return;
         }
@@ -860,10 +868,14 @@ void sendReplyToClient(aeEventLoop *el, int fd, void *privdata, int mask) {
     }
     if (c->bufpos == 0 && listLength(c->reply) == 0) {
         c->sentlen = 0;
+        pthread_mutex_unlock(&c->buffer_mutex);
+
         aeDeleteFileEvent(server.el,c->fd,AE_WRITABLE);
 
         /* Close connection after entire reply has been sent. */
         if (c->flags & REDIS_CLOSE_AFTER_REPLY) freeClient(c);
+    } else {
+        pthread_mutex_unlock(&c->buffer_mutex);
     }
 }
 

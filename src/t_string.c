@@ -344,7 +344,11 @@ void incrDecrCommand(redisClient *c, long long incr) {
         dbAdd(c->db,c->argv[1],new);
     signalModifiedKey(c->db,c->argv[1]);
     notifyKeyspaceEvent(REDIS_NOTIFY_STRING,"incrby",c->argv[1],c->db->id);
+
+    pthread_mutex_lock(&server.global_mutex);
     server.dirty++;
+    pthread_mutex_unlock(&server.global_mutex);
+
     addReply(c,shared.colon);
     addReply(c,new);
     addReply(c,shared.crlf);

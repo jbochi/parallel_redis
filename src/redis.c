@@ -861,6 +861,7 @@ unsigned int getLRUClock(void) {
 
 /* Add a sample to the operations per second array of samples. */
 void trackOperationsPerSecond(void) {
+    pthread_mutex_lock(&server.global_mutex);
     long long t = mstime() - server.ops_sec_last_sample_time;
     long long ops = server.stat_numcommands - server.ops_sec_last_sample_ops;
     long long ops_sec;
@@ -871,6 +872,7 @@ void trackOperationsPerSecond(void) {
     server.ops_sec_idx = (server.ops_sec_idx+1) % REDIS_OPS_SEC_SAMPLES;
     server.ops_sec_last_sample_time = mstime();
     server.ops_sec_last_sample_ops = server.stat_numcommands;
+    pthread_mutex_unlock(&server.global_mutex);
 }
 
 /* Return the mean of all the samples. */
@@ -2038,7 +2040,9 @@ void call(redisClient *c, int flags) {
         }
         redisOpArrayFree(&server.also_propagate);
     }
+    pthread_mutex_lock(&server.global_mutex);
     server.stat_numcommands++;
+    pthread_mutex_unlock(&server.global_mutex);
 
     if (should_lock) pthread_mutex_unlock(&server.call_mutex);
 }
@@ -3444,6 +3448,7 @@ int main(int argc, char **argv) {
     aeSetBeforeSleepProc(server.el,beforeSleep);
     aeMain(server.el);
     aeDeleteEventLoop(server.el);
+    pthread_mutex_destroy(&server.global_mutex);
     return 0;
 }
 

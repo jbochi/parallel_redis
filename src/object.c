@@ -40,7 +40,9 @@ robj *createObject(int type, void *ptr) {
     o->refcount = 1;
 
     /* Set the LRU to the current lruclock (minutes resolution). */
+    pthread_mutex_lock(&server.global_mutex);
     o->lru = LRU_CLOCK();
+    pthread_mutex_unlock(&server.global_mutex);
     return o;
 }
 
