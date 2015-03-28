@@ -30,6 +30,9 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
+#define _POSIX_C_SOURCE 200112L
+#define _XOPEN_SOURCE 700
+
 #include <stdio.h>
 #include <sys/time.h>
 #include <sys/types.h>
@@ -437,6 +440,7 @@ int aeProcessEvents(aeEventLoop *eventLoop, int flags)
             }
             processed++;
         }
+
     }
     /* Check time events */
     if (flags & AE_TIME_EVENTS)
@@ -472,10 +476,7 @@ void aeMain(aeEventLoop *eventLoop) {
     while (!eventLoop->stop) {
         if (eventLoop->beforesleep != NULL)
             eventLoop->beforesleep(eventLoop);
-
-        pthread_mutex_lock(&eventLoop->ae_mutex);
         aeProcessEvents(eventLoop, AE_ALL_EVENTS);
-        pthread_mutex_unlock(&eventLoop->ae_mutex);
     }
 }
 
