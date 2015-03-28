@@ -120,7 +120,10 @@ redisClient *createClient(int fd) {
     listSetFreeMethod(c->pubsub_patterns,decrRefCountVoid);
     listSetMatchMethod(c->pubsub_patterns,listMatchObjects);
 
-    pthread_mutex_init(&c->buffer_mutex, NULL);
+    pthread_mutexattr_init(&c->buffer_mutex_attr);
+    pthread_mutexattr_settype(&c->buffer_mutex_attr, PTHREAD_MUTEX_RECURSIVE);
+    pthread_mutex_init(&c->buffer_mutex, &c->buffer_mutex_attr);
+
     pthread_mutex_lock(&server.global_mutex);
     c->ctime = c->lastinteraction = server.unixtime;
     if (fd != -1) listAddNodeTail(server.clients,c);
@@ -881,6 +884,7 @@ void sendReplyToClient(aeEventLoop *el, int fd, void *privdata, int mask) {
 
 /* resetClient prepare the client to process the next command */
 void resetClient(redisClient *c) {
+    pthread_mutex_lock(&c->buffer_mutex);
     redisCommandProc *prevcmd = c->cmd ? c->cmd->proc : NULL;
 
     freeClientArgv(c);
@@ -891,6 +895,7 @@ void resetClient(redisClient *c) {
      * if what we just executed is not the ASKING command itself. */
     if (!(c->flags & REDIS_MULTI) && prevcmd != askingCommand)
         c->flags &= (~REDIS_ASKING);
+    pthread_mutex_unlock(&c->buffer_mutex);
 }
 
 int processInlineBuffer(redisClient *c) {

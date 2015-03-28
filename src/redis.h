@@ -533,6 +533,7 @@ typedef struct redisClient {
     int bufpos;
     char buf[REDIS_REPLY_CHUNK_BYTES];
     pthread_mutex_t buffer_mutex;
+    pthread_mutexattr_t buffer_mutex_attr;
 } redisClient;
 
 struct saveparam {

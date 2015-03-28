@@ -786,6 +786,7 @@ void sha1hex(char *digest, char *script, size_t len) {
 }
 
 void luaReplyToRedisReply(redisClient *c, lua_State *lua) {
+    pthread_mutex_lock(&c->buffer_mutex);
     int t = lua_type(lua,-1);
 
     switch(t) {
@@ -846,6 +847,7 @@ void luaReplyToRedisReply(redisClient *c, lua_State *lua) {
     default:
         addReply(c,shared.nullbulk);
     }
+    pthread_mutex_unlock(&c->buffer_mutex);
     lua_pop(lua,1);
 }
 
