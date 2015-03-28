@@ -96,7 +96,8 @@ redisClient *createClient(int fd) {
     c->bulklen = -1;
     c->sentlen = 0;
     c->flags = 0;
-    c->ctime = c->lastinteraction = server.unixtime;
+
+
     c->authenticated = 0;
     c->replstate = REDIS_REPL_NONE;
     c->reploff = 0;
@@ -120,7 +121,12 @@ redisClient *createClient(int fd) {
     c->pubsub_patterns = listCreate();
     listSetFreeMethod(c->pubsub_patterns,decrRefCountVoid);
     listSetMatchMethod(c->pubsub_patterns,listMatchObjects);
+
+    pthread_mutex_lock(&server.global_mutex);
+    c->ctime = c->lastinteraction = server.unixtime;
     if (fd != -1) listAddNodeTail(server.clients,c);
+    pthread_mutex_unlock(&server.global_mutex);
+
     initClientMultiState(c);
     return c;
 }
@@ -1400,7 +1406,7 @@ void rewriteClientCommandVector(redisClient *c, int argc, ...) {
     va_start(ap,argc);
     for (j = 0; j < argc; j++) {
         robj *a;
-        
+
         a = va_arg(ap, robj*);
         argv[j] = a;
         incrRefCount(a);
@@ -1422,7 +1428,7 @@ void rewriteClientCommandVector(redisClient *c, int argc, ...) {
  * The new val ref count is incremented, and the old decremented. */
 void rewriteClientCommandArgument(redisClient *c, int i, robj *newval) {
     robj *oldval;
-   
+
     redisAssertWithInfo(c,NULL,i < c->argc);
     oldval = c->argv[i];
     c->argv[i] = newval;

@@ -1017,8 +1017,10 @@ void databasesCron(void) {
  * every object access, and accuracy is not needed. To access a global var is
  * a lot faster than calling time(NULL) */
 void updateCachedTime(void) {
+    pthread_mutex_lock(&server.global_mutex);
     server.unixtime = time(NULL);
     server.mstime = mstime();
+    pthread_mutex_unlock(&server.global_mutex);
 }
 
 /* This is our timer interrupt, called server.hz times per second.
@@ -1042,8 +1044,6 @@ void updateCachedTime(void) {
 
 int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
     int j;
-
-    pthread_mutex_lock(&server.call_mutex);
 
     REDIS_NOTUSED(eventLoop);
     REDIS_NOTUSED(id);
@@ -1069,7 +1069,9 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
      *
      * Note that you can change the resolution altering the
      * REDIS_LRU_CLOCK_RESOLUTION define. */
+    pthread_mutex_lock(&server.global_mutex);
     server.lruclock = getLRUClock();
+    pthread_mutex_unlock(&server.global_mutex);
 
     /* Record the max memory used since the server was started. */
     if (zmalloc_used_memory() > server.stat_peak_memory)
@@ -1080,14 +1082,16 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
 
     /* We received a SIGTERM, shutting down here in a safe way, as it is
      * not ok doing so inside the signal handler. */
+    pthread_mutex_lock(&server.global_mutex);
     if (server.shutdown_asap) {
         if (prepareForShutdown(0) == REDIS_OK) {
-          pthread_mutex_unlock(&server.call_mutex);
+          pthread_mutex_unlock(&server.global_mutex);
           exit(0);
         }
         redisLog(REDIS_WARNING,"SIGTERM received but errors trying to shut down the server, check the logs for more information");
         server.shutdown_asap = 0;
     }
+    pthread_mutex_unlock(&server.global_mutex);
 
     /* Show some info about non-empty databases */
     run_with_period(5000) {
@@ -1230,8 +1234,6 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
     }
 
     server.cronloops++;
-
-    pthread_mutex_unlock(&server.call_mutex);
     return 1000/server.hz;
 }
 
@@ -3250,7 +3252,10 @@ static void sigtermHandler(int sig) {
     REDIS_NOTUSED(sig);
 
     redisLogFromHandler(REDIS_WARNING,"Received SIGTERM, scheduling shutdown...");
+
+    pthread_mutex_lock(&server.global_mutex);
     server.shutdown_asap = 1;
+    pthread_mutex_unlock(&server.global_mutex);
 }
 
 void setupSignalHandlers(void) {
@@ -3341,6 +3346,9 @@ int main(int argc, char **argv) {
     gettimeofday(&tv,NULL);
     dictSetHashFunctionSeed(tv.tv_sec^tv.tv_usec^getpid());
     server.sentinel_mode = checkForSentinelMode(argc,argv);
+
+    pthread_mutex_init(&server.global_mutex, NULL);
+
     initServerConfig();
 
     /* We need to init sentinel right now as parsing the configuration file

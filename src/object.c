@@ -663,7 +663,10 @@ char *strEncoding(int encoding) {
 /* Given an object returns the min number of milliseconds the object was never
  * requested, using an approximated LRU algorithm. */
 unsigned long long estimateObjectIdleTime(robj *o) {
+    pthread_mutex_lock(&server.global_mutex);
     unsigned long long lruclock = LRU_CLOCK();
+    pthread_mutex_unlock(&server.global_mutex);
+
     if (lruclock >= o->lru) {
         return (lruclock - o->lru) * REDIS_LRU_CLOCK_RESOLUTION;
     } else {
@@ -709,4 +712,3 @@ void objectCommand(redisClient *c) {
         addReplyError(c,"Syntax error. Try OBJECT (refcount|encoding|idletime)");
     }
 }
-

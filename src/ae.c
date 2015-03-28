@@ -476,7 +476,9 @@ void aeMain(aeEventLoop *eventLoop) {
     while (!eventLoop->stop) {
         if (eventLoop->beforesleep != NULL)
             eventLoop->beforesleep(eventLoop);
+        pthread_mutex_lock(&eventLoop->ae_mutex);
         aeProcessEvents(eventLoop, AE_ALL_EVENTS);
+        pthread_mutex_unlock(&eventLoop->ae_mutex);
     }
 }
 
