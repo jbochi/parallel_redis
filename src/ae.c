@@ -81,6 +81,11 @@ aeEventLoop *aeCreateEventLoop(int setsize) {
      * vector with it. */
     for (i = 0; i < setsize; i++)
         eventLoop->events[i].mask = AE_NONE;
+
+    pthread_mutexattr_init(&eventLoop->ae_mutex_attr);
+    pthread_mutexattr_settype(&eventLoop->ae_mutex_attr, PTHREAD_MUTEX_RECURSIVE);
+    pthread_mutex_init(&eventLoop->ae_mutex, &eventLoop->ae_mutex_attr);
+
     return eventLoop;
 
 err:
@@ -126,6 +131,7 @@ int aeResizeSetSize(aeEventLoop *eventLoop, int setsize) {
 }
 
 void aeDeleteEventLoop(aeEventLoop *eventLoop) {
+    pthread_mutex_destroy(&eventLoop->ae_mutex);
     aeApiFree(eventLoop);
     zfree(eventLoop->events);
     zfree(eventLoop->fired);
@@ -139,13 +145,17 @@ void aeStop(aeEventLoop *eventLoop) {
 int aeCreateFileEvent(aeEventLoop *eventLoop, int fd, int mask,
         aeFileProc *proc, void *clientData)
 {
+    pthread_mutex_lock(&eventLoop->ae_mutex);
+
     if (fd >= eventLoop->setsize) {
+        pthread_mutex_unlock(&eventLoop->ae_mutex);
         errno = ERANGE;
         return AE_ERR;
     }
     aeFileEvent *fe = &eventLoop->events[fd];
 
     if (aeApiAddEvent(eventLoop, fd, mask) == -1) {
+        pthread_mutex_unlock(&eventLoop->ae_mutex);
         return AE_ERR;
     }
     fe->mask |= mask;
@@ -154,6 +164,8 @@ int aeCreateFileEvent(aeEventLoop *eventLoop, int fd, int mask,
     fe->clientData = clientData;
     if (fd > eventLoop->maxfd)
         eventLoop->maxfd = fd;
+
+    pthread_mutex_unlock(&eventLoop->ae_mutex);
     return AE_OK;
 }
 
@@ -460,7 +472,10 @@ void aeMain(aeEventLoop *eventLoop) {
     while (!eventLoop->stop) {
         if (eventLoop->beforesleep != NULL)
             eventLoop->beforesleep(eventLoop);
+
+        pthread_mutex_lock(&eventLoop->ae_mutex);
         aeProcessEvents(eventLoop, AE_ALL_EVENTS);
+        pthread_mutex_unlock(&eventLoop->ae_mutex);
     }
 }
 
