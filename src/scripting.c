@@ -1031,7 +1031,9 @@ int executeEvalTask(evalTask *t) {
 
     /* We want the same PRNG sequence at every call so that our PRNG is
      * not affected by external state. */
+    pthread_mutex_lock(&server.global_mutex);
     redisSrand48(0);
+    pthread_mutex_unlock(&server.global_mutex);
 
     /* We set this flag to zero to remember that so far no random command
      * was called. This way we can allow the user to call commands like
